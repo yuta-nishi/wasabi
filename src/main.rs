@@ -2,13 +2,13 @@
 #![no_main]
 
 use core::arch::asm;
+use core::cmp::min;
 use core::ffi::c_void;
 use core::mem::offset_of;
 use core::mem::size_of;
 use core::panic::PanicInfo;
 use core::ptr::NonNull;
 use core::ptr::null_mut;
-use core::slice;
 
 type EfiHandle = u64;
 
@@ -136,19 +136,15 @@ extern "efiapi" fn efi_main(
     _image_handle: EfiHandle,
     efi_system_table: &EfiSystemTable,
 ) -> EfiStatus {
-    let efi_graphics_output_protocol = locate_graphic_protocol(efi_system_table).unwrap();
-    let vram_addr = efi_graphics_output_protocol.mode.frame_buffer_base;
-    let vram_byte_size = efi_graphics_output_protocol.mode.frame_buffer_size;
-    // SAFETY: `frame_buffer_base`/`frame_buffer_size` describe the linear
-    // framebuffer the firmware handed us; it is valid for this many bytes.
-    let vram = unsafe {
-        slice::from_raw_parts_mut(
-            vram_addr as *mut u32,
-            vram_byte_size / size_of::<u32>(),
-        )
-    };
-    for e in vram {
-        *e = 0xffffff;
+    let mut vram = init_vram(efi_system_table).expect("init_vram failed");
+    let vw = vram.width;
+    let vh = vram.height;
+    fill_rect(&mut vram, 0x000000, 0, 0, vw, vh).expect("fill_rect failed");
+    fill_rect(&mut vram, 0xff0000, 32, 32, 32, 32).expect("fill_rect failed");
+    fill_rect(&mut vram, 0x00ff00, 64, 64, 64, 64).expect("fill_rect failed");
+    fill_rect(&mut vram, 0x0000ff, 128, 128, 128, 128).expect("fill_rect failed");
+    for i in 0..256 {
+        let _ = draw_point(&mut vram, 0x010101 * i as u32, i, i);
     }
     loop {
         hlt()
@@ -160,4 +156,115 @@ fn panic(_info: &PanicInfo) -> ! {
     loop {
         hlt()
     }
+}
+
+trait Bitmap {
+    fn bytes_per_pixel(&self) -> i64;
+    fn pixels_per_line(&self) -> i64;
+    fn width(&self) -> i64;
+    fn height(&self) -> i64;
+    fn buf_mut(&mut self) -> *mut u8;
+    /// # Safety
+    ///
+    /// The returned pointer is valid as long as the given coordinates are valid,
+    /// i.e. they pass the `is_in_*_range` tests.
+    unsafe fn unchecked_pixel_at_mut(&mut self, x: i64, y: i64) -> *mut u32 {
+        // SAFETY: the caller guarantees that (x, y) is in range.
+        unsafe {
+            self.buf_mut()
+                .add(((y * self.pixels_per_line() + x) * self.bytes_per_pixel()) as usize)
+                as *mut u32
+        }
+    }
+    fn pixel_at_mut(&mut self, x: i64, y: i64) -> Option<&mut u32> {
+        if self.is_in_x_range(x) && self.is_in_y_range(y) {
+            // SAFETY: (x, y) was validated by the checks above.
+            unsafe { Some(&mut *(self.unchecked_pixel_at_mut(x, y))) }
+        } else {
+            None
+        }
+    }
+    fn is_in_x_range(&self, px: i64) -> bool {
+        0 <= px && px < min(self.width(), self.pixels_per_line())
+    }
+    fn is_in_y_range(&self, py: i64) -> bool {
+        0 <= py && py < self.height()
+    }
+}
+
+#[derive(Clone, Copy)]
+struct VramBufferInfo {
+    buf: *mut u8,
+    width: i64,
+    height: i64,
+    pixels_per_line: i64,
+}
+
+impl Bitmap for VramBufferInfo {
+    fn bytes_per_pixel(&self) -> i64 {
+        4
+    }
+    fn pixels_per_line(&self) -> i64 {
+        self.pixels_per_line
+    }
+    fn width(&self) -> i64 {
+        self.width
+    }
+    fn height(&self) -> i64 {
+        self.height
+    }
+    fn buf_mut(&mut self) -> *mut u8 {
+        self.buf
+    }
+}
+
+fn init_vram(efi_system_table: &EfiSystemTable) -> Result<VramBufferInfo> {
+    let gp = locate_graphic_protocol(efi_system_table)?;
+    Ok(VramBufferInfo {
+        buf: gp.mode.frame_buffer_base as *mut u8,
+        width: gp.mode.info.horizontal_resolution as i64,
+        height: gp.mode.info.vertical_resolution as i64,
+        pixels_per_line: gp.mode.info.pixels_per_scan_line as i64,
+    })
+}
+
+/// # Safety
+///
+/// (x, y) must be a valid point in the buffer.
+unsafe fn unchecked_draw_point<T: Bitmap>(buf: &mut T, color: u32, x: i64, y: i64) {
+    // SAFETY: the caller guarantees that (x, y) is in range.
+    unsafe {
+        *buf.unchecked_pixel_at_mut(x, y) = color;
+    }
+}
+
+fn draw_point<T: Bitmap>(buf: &mut T, color: u32, x: i64, y: i64) -> Result<()> {
+    *(buf.pixel_at_mut(x, y).ok_or("Out of Range")?) = color;
+    Ok(())
+}
+
+fn fill_rect<T: Bitmap>(
+    buf: &mut T,
+    color: u32,
+    x: i64,
+    y: i64,
+    w: i64,
+    h: i64,
+) -> Result<()> {
+    if !buf.is_in_x_range(x)
+        || !buf.is_in_y_range(y)
+        || !buf.is_in_x_range(x + w - 1)
+        || !buf.is_in_y_range(y + h - 1)
+    {
+        return Err("Out of Range");
+    }
+    for dy in 0..h {
+        for dx in 0..w {
+            // SAFETY: the rectangle bounds were checked above.
+            unsafe {
+                unchecked_draw_point(buf, color, x + dx, y + dy);
+            }
+        }
+    }
+    Ok(())
 }
