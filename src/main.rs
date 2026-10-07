@@ -1,14 +1,19 @@
 #![no_std]
 #![no_main]
 
+use core::ffi::c_void;
 use core::mem::offset_of;
 use core::mem::size_of;
 use core::panic::PanicInfo;
 use core::ptr::null_mut;
+use core::ptr::NonNull;
 use core::slice;
 
-type EfiVoid = u8;
 type EfiHandle = u64;
+
+/// A C output parameter: a pointer through which the callee writes a `T`.
+type Out<T> = *mut T;
+
 type Result<T, E = &'static str> = core::result::Result<T, E>;
 
 #[repr(C)]
@@ -34,16 +39,43 @@ enum EfiStatus {
     Success = 0,
 }
 
+/// `EFI_BOOT_SERVICES.LocateProtocol` (UEFI spec 7.3.16).
+///
+/// `registration` is OPTIONAL: pass null to locate a protocol without
+/// subscribing to protocol-notify events.
+type LocateProtocolFn = extern "efiapi" fn(
+    protocol: *const EfiGuid,
+    registration: *mut c_void,
+    out_interface: Out<*mut c_void>,
+) -> EfiStatus;
+
 #[repr(C)]
 struct EfiBootServicesTable {
     _reserved0: [u64; 40],
-    locate_protocol: extern "win64" fn(
-        protocol: *const EfiGuid,
-        registration: *const EfiVoid,
-        interface: *mut *mut EfiVoid,
-    ) -> EfiStatus,
+    locate_protocol_fn: LocateProtocolFn,
 }
-const _: () = assert!(offset_of!(EfiBootServicesTable, locate_protocol) == 320);
+const _: () = assert!(offset_of!(EfiBootServicesTable, locate_protocol_fn) == 320);
+
+impl EfiBootServicesTable {
+    /// Locates the protocol identified by `protocol` and borrows its interface.
+    ///
+    /// # Safety
+    ///
+    /// `'a` is chosen by the caller: they must ensure the located interface stays
+    /// valid and is not mutated for `'a`.
+    unsafe fn locate_protocol<'a, T>(&self, protocol: &EfiGuid) -> Option<&'a T> {
+        let mut out: *mut T = null_mut();
+        let locate_protocol_fn = self.locate_protocol_fn;
+        let status =
+            locate_protocol_fn(protocol, null_mut(), &raw mut out as Out<*mut c_void>);
+        if status != EfiStatus::Success {
+            return None;
+        }
+        // SAFETY: written by the firmware on success; non-null is checked below.
+        let out = NonNull::new(out)?;
+        Some(unsafe { out.as_ref() })
+    }
+}
 
 #[repr(C)]
 struct EfiSystemTable {
@@ -84,16 +116,14 @@ struct EfiGraphicsOutputProtocol<'a> {
 fn locate_graphic_protocol<'a>(
     efi_system_table: &EfiSystemTable,
 ) -> Result<&'a EfiGraphicsOutputProtocol<'a>> {
-    let mut graphic_output_protocol = null_mut::<EfiGraphicsOutputProtocol>();
-    let status = (efi_system_table.boot_services.locate_protocol)(
-        &EFI_GRAPHICS_OUTPUT_PROTOCOL_GUID,
-        null_mut::<EfiVoid>(),
-        &mut graphic_output_protocol as *mut *mut EfiGraphicsOutputProtocol as *mut *mut EfiVoid,
-    );
-    if status != EfiStatus::Success {
-        return Err("Failed to locate graphics output protocol");
+    // SAFETY: the GOP interface is owned by the firmware and lives for the whole
+    // lifetime of this program, so borrowing it for `'a` is sound.
+    unsafe {
+        efi_system_table
+            .boot_services
+            .locate_protocol(&EFI_GRAPHICS_OUTPUT_PROTOCOL_GUID)
     }
-    Ok(unsafe { &*graphic_output_protocol })
+    .ok_or("Failed to locate graphics output protocol")
 }
 
 #[unsafe(no_mangle)]
@@ -101,11 +131,17 @@ extern "efiapi" fn efi_main(
     _image_handle: EfiHandle,
     efi_system_table: &EfiSystemTable,
 ) -> EfiStatus {
-    let efi_graphics_output_protocol = locate_graphic_protocol(efi_system_table).unwrap();
+    let efi_graphics_output_protocol =
+        locate_graphic_protocol(efi_system_table).unwrap();
     let vram_addr = efi_graphics_output_protocol.mode.frame_buffer_base;
     let vram_byte_size = efi_graphics_output_protocol.mode.frame_buffer_size;
+    // SAFETY: `frame_buffer_base`/`frame_buffer_size` describe the linear
+    // framebuffer the firmware handed us; it is valid for this many bytes.
     let vram = unsafe {
-        slice::from_raw_parts_mut(vram_addr as *mut u32, vram_byte_size / size_of::<u32>())
+        slice::from_raw_parts_mut(
+            vram_addr as *mut u32,
+            vram_byte_size / size_of::<u32>(),
+        )
     };
     for e in vram {
         *e = 0xffffff;
