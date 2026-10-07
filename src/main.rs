@@ -1,12 +1,13 @@
 #![no_std]
 #![no_main]
 
+use core::arch::asm;
 use core::ffi::c_void;
 use core::mem::offset_of;
 use core::mem::size_of;
 use core::panic::PanicInfo;
-use core::ptr::null_mut;
 use core::ptr::NonNull;
+use core::ptr::null_mut;
 use core::slice;
 
 type EfiHandle = u64;
@@ -126,13 +127,16 @@ fn locate_graphic_protocol<'a>(
     .ok_or("Failed to locate graphics output protocol")
 }
 
+pub fn hlt() {
+    unsafe { asm!("hlt") }
+}
+
 #[unsafe(no_mangle)]
 extern "efiapi" fn efi_main(
     _image_handle: EfiHandle,
     efi_system_table: &EfiSystemTable,
 ) -> EfiStatus {
-    let efi_graphics_output_protocol =
-        locate_graphic_protocol(efi_system_table).unwrap();
+    let efi_graphics_output_protocol = locate_graphic_protocol(efi_system_table).unwrap();
     let vram_addr = efi_graphics_output_protocol.mode.frame_buffer_base;
     let vram_byte_size = efi_graphics_output_protocol.mode.frame_buffer_size;
     // SAFETY: `frame_buffer_base`/`frame_buffer_size` describe the linear
@@ -146,10 +150,14 @@ extern "efiapi" fn efi_main(
     for e in vram {
         *e = 0xffffff;
     }
-    loop {}
+    loop {
+        hlt()
+    }
 }
 
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {
-    loop {}
+    loop {
+        hlt()
+    }
 }

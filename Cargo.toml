@@ -4,3 +4,12 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+
+# The default test/bench harness links std, which already defines the
+# `panic_impl` lang item and clashes with our #[panic_handler] (E0152).
+# Disabling both harnesses keeps `cargo check --all-targets` (and
+# rust-analyzer) working. A custom test framework is introduced in ch3.
+[[bin]]
+name = "wasabi"
+test = false
+bench = false
