@@ -137,6 +137,13 @@ type GetMemoryMapFn = extern "efiapi" fn(
     descriptor_version: *mut u32,
 ) -> EfiStatus;
 
+/// `EFI_BOOT_SERVICES.ExitBootServices` (UEFI spec 7.4.6).
+///
+/// `map_key` must come from the most recent `GetMemoryMap`; the call fails if the
+/// map changed in between, in which case the map has to be fetched again.
+type ExitBootServicesFn =
+    extern "efiapi" fn(image_handle: EfiHandle, map_key: usize) -> EfiStatus;
+
 /// `EFI_BOOT_SERVICES.LocateProtocol` (UEFI spec 7.3.16).
 ///
 /// `registration` is OPTIONAL: pass null to locate a protocol without
@@ -151,10 +158,13 @@ type LocateProtocolFn = extern "efiapi" fn(
 struct EfiBootServicesTable {
     _reserved0: [u64; 7],
     get_memory_map_fn: GetMemoryMapFn,
-    _reserved1: [u64; 32],
+    _reserved1: [u64; 21],
+    exit_boot_services_fn: ExitBootServicesFn,
+    _reserved2: [u64; 10],
     locate_protocol_fn: LocateProtocolFn,
 }
 const _: () = assert!(offset_of!(EfiBootServicesTable, get_memory_map_fn) == 56);
+const _: () = assert!(offset_of!(EfiBootServicesTable, exit_boot_services_fn) == 232);
 const _: () = assert!(offset_of!(EfiBootServicesTable, locate_protocol_fn) == 320);
 
 impl EfiBootServicesTable {
@@ -245,7 +255,7 @@ pub fn hlt() {
 
 #[unsafe(no_mangle)]
 extern "efiapi" fn efi_main(
-    _image_handle: EfiHandle,
+    image_handle: EfiHandle,
     efi_system_table: &EfiSystemTable,
 ) -> EfiStatus {
     let mut vram = init_vram(efi_system_table).expect("init_vram failed");
@@ -276,8 +286,31 @@ extern "efiapi" fn efi_main(
         "Total: {total_memory_pages} pages = {total_memory_size_mib} MiB"
     )
     .unwrap();
+    exit_from_efi_boot_services(image_handle, efi_system_table, &mut memory_map);
+    writeln!(w, "Hello, Non-UEFI world!").unwrap();
     loop {
         hlt()
+    }
+}
+
+/// Hands control over from the firmware to us: after this returns, boot services
+/// (including `GetMemoryMap`) must not be called any more.
+///
+/// The memory map can change between the two calls, so re-fetch it until
+/// `ExitBootServices` succeeds.
+fn exit_from_efi_boot_services(
+    image_handle: EfiHandle,
+    efi_system_table: &EfiSystemTable,
+    memory_map: &mut MemoryMapHolder,
+) {
+    loop {
+        let status = efi_system_table.boot_services.get_memory_map(memory_map);
+        assert_eq!(status, EfiStatus::Success);
+        let exit_boot_services_fn = efi_system_table.boot_services.exit_boot_services_fn;
+        let status = exit_boot_services_fn(image_handle, memory_map.map_key);
+        if status == EfiStatus::Success {
+            break;
+        }
     }
 }
 
