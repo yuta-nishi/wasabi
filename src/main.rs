@@ -43,6 +43,100 @@ enum EfiStatus {
     Success = 0,
 }
 
+/// The `EFI_MEMORY_TYPE` values that describe what a memory region is for.
+#[repr(i64)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(non_camel_case_types)]
+pub enum EfiMemoryType {
+    RESERVED = 0,
+    LOADER_CODE,
+    LOADER_DATA,
+    BOOT_SERVICES_CODE,
+    BOOT_SERVICES_DATA,
+    RUNTIME_SERVICES_CODE,
+    RUNTIME_SERVICES_DATA,
+    CONVENTIONAL_MEMORY,
+    UNUSABLE_MEMORY,
+    ACPI_RECLAIM_MEMORY,
+    ACPI_MEMORY_NVS,
+    MEMORY_MAPPED_IO,
+    MEMORY_MAPPED_IO_PORT_SPACE,
+    PAL_CODE,
+    PERSISTENT_MEMORY,
+}
+
+/// One entry of the memory map that `GetMemoryMap` returns.
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct EfiMemoryDescriptor {
+    memory_type: EfiMemoryType,
+    physical_start: u64,
+    virtual_start: u64,
+    number_of_pages: u64,
+    attribute: u64,
+}
+
+const MEMORY_MAP_BUFFER_SIZE: usize = 0x8000;
+
+/// The caller-provided buffer plus the metadata `GetMemoryMap` fills in.
+struct MemoryMapHolder {
+    memory_map_buffer: [u8; MEMORY_MAP_BUFFER_SIZE],
+    memory_map_size: usize,
+    map_key: usize,
+    descriptor_size: usize,
+    descriptor_version: u32,
+}
+
+struct MemoryMapIterator<'a> {
+    map: &'a MemoryMapHolder,
+    ofs: usize,
+}
+
+impl<'a> Iterator for MemoryMapIterator<'a> {
+    type Item = &'a EfiMemoryDescriptor;
+    fn next(&mut self) -> Option<&'a EfiMemoryDescriptor> {
+        if self.ofs >= self.map.memory_map_size {
+            None
+        } else {
+            // SAFETY: `ofs` stays inside the buffer because it is advanced by
+            // `descriptor_size` until it reaches `memory_map_size`.
+            let e: &EfiMemoryDescriptor = unsafe {
+                &*(self.map.memory_map_buffer.as_ptr().add(self.ofs)
+                    as *const EfiMemoryDescriptor)
+            };
+            self.ofs += self.map.descriptor_size;
+            Some(e)
+        }
+    }
+}
+
+impl MemoryMapHolder {
+    pub const fn new() -> MemoryMapHolder {
+        MemoryMapHolder {
+            memory_map_buffer: [0; MEMORY_MAP_BUFFER_SIZE],
+            memory_map_size: MEMORY_MAP_BUFFER_SIZE,
+            map_key: 0,
+            descriptor_size: 0,
+            descriptor_version: 0,
+        }
+    }
+    pub fn iter(&self) -> MemoryMapIterator<'_> {
+        MemoryMapIterator { map: self, ofs: 0 }
+    }
+}
+
+/// `EFI_BOOT_SERVICES.GetMemoryMap` (UEFI spec, Memory Allocation Services).
+///
+/// `memory_map_size` is in/out: it holds the buffer size on entry, and on
+/// `BufferTooSmall` the firmware writes the required size into it.
+type GetMemoryMapFn = extern "efiapi" fn(
+    memory_map_size: *mut usize,
+    memory_map: *mut u8,
+    map_key: *mut usize,
+    descriptor_size: *mut usize,
+    descriptor_version: *mut u32,
+) -> EfiStatus;
+
 /// `EFI_BOOT_SERVICES.LocateProtocol` (UEFI spec 7.3.16).
 ///
 /// `registration` is OPTIONAL: pass null to locate a protocol without
@@ -55,12 +149,27 @@ type LocateProtocolFn = extern "efiapi" fn(
 
 #[repr(C)]
 struct EfiBootServicesTable {
-    _reserved0: [u64; 40],
+    _reserved0: [u64; 7],
+    get_memory_map_fn: GetMemoryMapFn,
+    _reserved1: [u64; 32],
     locate_protocol_fn: LocateProtocolFn,
 }
+const _: () = assert!(offset_of!(EfiBootServicesTable, get_memory_map_fn) == 56);
 const _: () = assert!(offset_of!(EfiBootServicesTable, locate_protocol_fn) == 320);
 
 impl EfiBootServicesTable {
+    /// Fills `map` with the firmware's current memory map.
+    fn get_memory_map(&self, map: &mut MemoryMapHolder) -> EfiStatus {
+        let get_memory_map_fn = self.get_memory_map_fn;
+        get_memory_map_fn(
+            &mut map.memory_map_size,
+            map.memory_map_buffer.as_mut_ptr(),
+            &mut map.map_key,
+            &mut map.descriptor_size,
+            &mut map.descriptor_version,
+        )
+    }
+
     /// Locates the protocol identified by `protocol` and borrows its interface.
     ///
     /// # Safety
@@ -143,37 +252,53 @@ extern "efiapi" fn efi_main(
     let vw = vram.width;
     let vh = vram.height;
     fill_rect(&mut vram, 0x000000, 0, 0, vw, vh).expect("fill_rect failed");
-    fill_rect(&mut vram, 0xff0000, 32, 32, 32, 32).expect("fill_rect failed");
-    fill_rect(&mut vram, 0x00ff00, 64, 64, 64, 64).expect("fill_rect failed");
-    fill_rect(&mut vram, 0x0000ff, 128, 128, 128, 128).expect("fill_rect failed");
-    for i in 0..256 {
-        let _ = draw_point(&mut vram, 0x010101 * i as u32, i, i);
-    }
-    let grid_size: i64 = 32;
-    let rect_size: i64 = grid_size * 8;
-    for i in (0..=rect_size).step_by(grid_size as usize) {
-        let _ = draw_line(&mut vram, 0xff0000, 0, i, rect_size, i);
-        let _ = draw_line(&mut vram, 0xff0000, i, 0, i, rect_size);
-    }
-    let cx = rect_size / 2;
-    let cy = rect_size / 2;
-    for i in (0..=rect_size).step_by(grid_size as usize) {
-        let _ = draw_line(&mut vram, 0xffff00, cx, cy, 0, i);
-        let _ = draw_line(&mut vram, 0x00ffff, cx, cy, i, 0);
-        let _ = draw_line(&mut vram, 0xff00ff, cx, cy, rect_size, i);
-        let _ = draw_line(&mut vram, 0xffffff, cx, cy, i, rect_size);
-    }
-    for (i, c) in "ABCDEF".chars().enumerate() {
-        draw_font_fg(&mut vram, i as i64 * 16 + 256, i as i64 * 16, 0xffffff, c)
-    }
-    draw_str_fg(&mut vram, 256, 256, 0xffffff, "Hello, world!");
+    draw_test_pattern(&mut vram);
     let mut w = VramTextWriter::new(&mut vram);
     for i in 0..4 {
         writeln!(w, "i = {i}").unwrap();
     }
+    let mut memory_map = MemoryMapHolder::new();
+    let status = efi_system_table
+        .boot_services
+        .get_memory_map(&mut memory_map);
+    writeln!(w, "{status:?}").unwrap();
+    let mut total_memory_pages = 0;
+    for e in memory_map.iter() {
+        if e.memory_type != EfiMemoryType::CONVENTIONAL_MEMORY {
+            continue;
+        }
+        total_memory_pages += e.number_of_pages;
+        writeln!(w, "{e:?}").unwrap();
+    }
+    let total_memory_size_mib = total_memory_pages * 4096 / 1024 / 1024;
+    writeln!(
+        w,
+        "Total: {total_memory_pages} pages = {total_memory_size_mib} MiB"
+    )
+    .unwrap();
     loop {
         hlt()
     }
+}
+
+fn draw_test_pattern<T: Bitmap>(buf: &mut T) {
+    let w = 128;
+    let left = buf.width() - w - 1;
+    let colors = [0x000000, 0xff0000, 0x00ff00, 0x0000ff];
+    let h = 64;
+    for (i, c) in colors.iter().enumerate() {
+        let y = i as i64 * h;
+        fill_rect(buf, *c, left, y, h, h).expect("fill_rect failed");
+        fill_rect(buf, !*c, left + h, y, h, h).expect("fill_rect failed");
+    }
+    let points = [(0, 0), (0, w), (w, 0), (w, w)];
+    for (x0, y0) in points.iter() {
+        for (x1, y1) in points.iter() {
+            let _ = draw_line(buf, 0xffffff, left + *x0, *y0, left + *x1, *y1);
+        }
+    }
+    draw_str_fg(buf, left, h * colors.len() as i64, 0x00ff00, "0123456789");
+    draw_str_fg(buf, left, h * colors.len() as i64 + 16, 0x00ff00, "ABCDEF");
 }
 
 #[panic_handler]
