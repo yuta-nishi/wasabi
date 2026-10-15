@@ -5,11 +5,21 @@ edition = "2024"
 
 [dependencies]
 
-# The default test/bench harness links std, which already defines the
-# `panic_impl` lang item and clashes with our #[panic_handler] (E0152).
-# Disabling both harnesses keeps `cargo check --all-targets` (and
-# rust-analyzer) working. A custom test framework is introduced in ch3.
+# The built-in test/bench harness links std, which already defines the
+# `panic_impl` lang item and clashes with our #[panic_handler] (E0152), so the
+# bin and lib harnesses are off. Tests run through our own runner instead:
+# `tests/runner.rs` boots under QEMU (`harness = false`) and reports its verdict
+# through the isa-debug-exit device, which `scripts/launch_qemu.sh` turns back
+# into a cargo exit status.
+[lib]
+test = false
+doctest = false
+
 [[bin]]
 name = "wasabi"
 test = false
 bench = false
+
+[[test]]
+name = "runner"
+harness = false
