@@ -1,0 +1,5 @@
+# shfmt reads .editorconfig, so this keeps shell scripts on the two-space
+# indenting used by this project (plain `shfmt` would otherwise use tabs).
+[*.sh]
+indent_style = space
+indent_size = 2
