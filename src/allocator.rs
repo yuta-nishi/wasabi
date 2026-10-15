@@ -9,6 +9,9 @@
 extern crate alloc;
 
 use crate::result::Result;
+use crate::uefi::EfiMemoryDescriptor;
+use crate::uefi::EfiMemoryType;
+use crate::uefi::MemoryMapHolder;
 use alloc::alloc::GlobalAlloc;
 use alloc::alloc::Layout;
 use alloc::boxed::Box;
@@ -187,5 +190,39 @@ impl FirstFitAllocator {
             cursor = node.next_header.as_mut();
         }
         null_mut()
+    }
+
+    /// Adds every conventional-memory region of `memory_map` to the free list.
+    pub fn init_with_mmap(&self, memory_map: &MemoryMapHolder) {
+        for e in memory_map.iter() {
+            if e.memory_type() != EfiMemoryType::CONVENTIONAL_MEMORY {
+                continue;
+            }
+            self.add_free_from_descriptor(e);
+        }
+    }
+
+    fn add_free_from_descriptor(&self, desc: &EfiMemoryDescriptor) {
+        let mut start_addr = desc.physical_start() as usize;
+        let mut size = desc.number_of_pages() as usize * 4096;
+        // Never hand out address 0: `alloc` reports failure as null.
+        if start_addr == 0 {
+            start_addr += 4096;
+            size = size.saturating_sub(4096);
+        }
+        if size <= 4096 {
+            return;
+        }
+        // SAFETY: the descriptor covers `size` bytes of conventional memory at
+        // `start_addr`, which the firmware handed over to us, so a header can be
+        // written at its start.
+        let mut header = unsafe { Header::new_from_addr(start_addr) };
+        header.size = size;
+
+        // Regions from the memory map are not contiguous, so they cannot be
+        // merged: the order does not matter and new regions go to the front.
+        let mut first_header = self.first_header.borrow_mut();
+        header.next_header = first_header.take();
+        *first_header = Some(header);
     }
 }
