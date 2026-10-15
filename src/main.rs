@@ -4,6 +4,7 @@
 use core::fmt::Write;
 use core::panic::PanicInfo;
 use core::writeln;
+use wasabi::allocator::ALLOCATOR;
 use wasabi::graphics::Bitmap;
 use wasabi::graphics::draw_test_pattern;
 use wasabi::graphics::fill_rect;
@@ -53,6 +54,9 @@ extern "efiapi" fn efi_main(
     )
     .unwrap();
     exit_from_efi_boot_services(image_handle, efi_system_table, &mut memory_map);
+    // Until ExitBootServices the firmware may still allocate from conventional
+    // memory, so the heap is only carved out of the now-frozen map.
+    ALLOCATOR.init_with_mmap(&memory_map);
     writeln!(w, "Hello, Non-UEFI world!").unwrap();
     loop {
         hlt()
