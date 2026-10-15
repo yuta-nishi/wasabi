@@ -1,5 +1,5 @@
 #!/bin/bash -e
-PROJ_ROOT="$(dirname $(dirname ${BASH_SOURCE:-$0}))"
+PROJ_ROOT="$(dirname "$(dirname "${BASH_SOURCE:-$0}")")"
 cd "${PROJ_ROOT}"
 
 PATH_TO_EFI="$1"
@@ -7,7 +7,7 @@ shift
 
 rm -rf mnt
 mkdir -p mnt/EFI/BOOT/
-cp ${PATH_TO_EFI} mnt/EFI/BOOT/BOOTX64.EFI
+cp "${PATH_TO_EFI}" mnt/EFI/BOOT/BOOTX64.EFI
 set +e
 qemu-system-x86_64 \
   -m 4G \
@@ -25,6 +25,6 @@ elif [ $RETCODE -eq 3 ]; then
   printf "\nPASS\n"
   exit 0
 else
-  printf "\nFAIL: QEMU returned $RETCODE\n"
+  printf "\nFAIL: QEMU returned %s\n" "$RETCODE"
   exit 1
 fi
