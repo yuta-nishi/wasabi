@@ -5,9 +5,12 @@
 // own: it is a helper module of this one.
 #[path = "runner/allocator.rs"]
 mod allocator;
+#[path = "runner/debug.rs"]
+mod debug;
 
 use core::panic::PanicInfo;
 use wasabi::allocator::ALLOCATOR;
+use wasabi::println;
 use wasabi::qemu::QemuExitCode;
 use wasabi::qemu::exit_qemu;
 use wasabi::test_runner::run_tests;
@@ -31,14 +34,32 @@ extern "efiapi" fn efi_main(
     ALLOCATOR.init_with_mmap(&memory_map);
 
     run_tests(&[
-        allocator::round_up_to_nearest_pow2_cases,
-        allocator::vec_grow_and_drop,
-        allocator::allocations_are_aligned,
-        allocator::allocated_objects_have_no_overlap,
+        (
+            "round_up_to_nearest_pow2_cases",
+            allocator::round_up_to_nearest_pow2_cases,
+        ),
+        ("vec_grow_and_drop", allocator::vec_grow_and_drop),
+        (
+            "allocations_are_aligned",
+            allocator::allocations_are_aligned,
+        ),
+        (
+            "allocated_objects_have_no_overlap",
+            allocator::allocated_objects_have_no_overlap,
+        ),
+        (
+            "hexdump_prints_16_bytes_per_line",
+            debug::hexdump_prints_16_bytes_per_line,
+        ),
+        (
+            "hexdump_pads_the_last_line",
+            debug::hexdump_pads_the_last_line,
+        ),
     ])
 }
 
 #[panic_handler]
-fn panic(_info: &PanicInfo) -> ! {
+fn panic(info: &PanicInfo) -> ! {
+    println!("{info}");
     exit_qemu(QemuExitCode::Fail);
 }
