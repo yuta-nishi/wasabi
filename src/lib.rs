@@ -1,5 +1,6 @@
 #![no_std]
 
+pub mod allocator;
 pub mod graphics;
 pub mod qemu;
 pub mod result;
