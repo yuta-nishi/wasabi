@@ -19,13 +19,18 @@ qemu-system-x86_64 \
 RETCODE=$?
 set -e
 # QEMU exits with (isa-debug-exit value << 1) | 1, so our QemuExitCode::Success
-# (0x1) shows up as 3. The boot may also end with the firmware's own status.
-if [ $RETCODE -eq 0 ]; then
-  exit 0
-elif [ $RETCODE -eq 3 ]; then
+# (0x1) shows up as 3.
+if [ $RETCODE -eq 3 ]; then
   printf "\nPASS\n"
   exit 0
-else
-  printf "\nFAIL: QEMU returned %s\n" "$RETCODE"
-  exit 1
 fi
+
+# Test binaries always end through isa-debug-exit, so any other status means the
+# verdict never arrived. The OS binary itself has no verdict to report: a clean
+# QEMU exit (0) is fine there.
+if [ $RETCODE -eq 0 ] && [[ "$PATH_TO_EFI" != */deps/* ]]; then
+  exit 0
+fi
+
+printf "\nFAIL: QEMU returned %s (expected 3)\n" "$RETCODE"
+exit 1
