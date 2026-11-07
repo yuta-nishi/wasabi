@@ -10,7 +10,7 @@ mod debug;
 
 use core::panic::PanicInfo;
 use wasabi::allocator::ALLOCATOR;
-use wasabi::println;
+use wasabi::error;
 use wasabi::qemu::QemuExitCode;
 use wasabi::qemu::exit_qemu;
 use wasabi::test_runner::run_tests;
@@ -60,6 +60,6 @@ extern "efiapi" fn efi_main(
 
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
-    println!("{info}");
+    error!("{info}");
     exit_qemu(QemuExitCode::Fail);
 }
