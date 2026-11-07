@@ -7,31 +7,29 @@
 mod allocator;
 #[path = "runner/debug.rs"]
 mod debug;
+#[path = "runner/interrupts.rs"]
+mod interrupts;
 
 use core::panic::PanicInfo;
-use wasabi::allocator::ALLOCATOR;
 use wasabi::error;
 use wasabi::qemu::QemuExitCode;
 use wasabi::qemu::exit_qemu;
+use wasabi::init::init_basic_runtime;
 use wasabi::test_runner::run_tests;
 use wasabi::uefi::EfiHandle;
 use wasabi::uefi::EfiStatus;
 use wasabi::uefi::EfiSystemTable;
-use wasabi::uefi::MemoryMapHolder;
 
 #[unsafe(no_mangle)]
 extern "efiapi" fn efi_main(
-    _image_handle: EfiHandle,
+    image_handle: EfiHandle,
     efi_system_table: &EfiSystemTable,
 ) -> EfiStatus {
-    // The tests allocate, so give them the same heap the OS builds: the
-    // conventional-memory regions of the firmware's map.
-    let mut memory_map = MemoryMapHolder::new();
-    let status = efi_system_table
-        .boot_services()
-        .get_memory_map(&mut memory_map);
-    assert_eq!(status, EfiStatus::Success, "get_memory_map failed");
-    ALLOCATOR.init_with_mmap(&memory_map);
+    // Give the tests the same runtime the OS builds: the heap comes from the
+    // frozen memory map, and the firmware is gone before we install our own
+    // GDT/IDT (its interrupt handlers would not survive the switch).
+    let _memory_map = init_basic_runtime(image_handle, efi_system_table);
+    let _exceptions = wasabi::exceptions::init();
 
     run_tests(&[
         (
@@ -54,6 +52,10 @@ extern "efiapi" fn efi_main(
         (
             "hexdump_pads_the_last_line",
             debug::hexdump_pads_the_last_line,
+        ),
+        (
+            "breakpoint_resumes_execution",
+            interrupts::breakpoint_resumes_execution,
         ),
     ])
 }

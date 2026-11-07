@@ -1,5 +1,3 @@
-//! Debug printing helpers.
-
 use crate::serial::Serial;
 use core::fmt;
 

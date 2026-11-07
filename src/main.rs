@@ -5,6 +5,7 @@ use core::fmt::Write;
 use core::panic::PanicInfo;
 use core::writeln;
 use wasabi::error;
+use wasabi::exceptions;
 use wasabi::graphics::Bitmap;
 use wasabi::graphics::draw_test_pattern;
 use wasabi::graphics::fill_rect;
@@ -52,6 +53,7 @@ extern "efiapi" fn efi_main(
     .unwrap();
     writeln!(w, "Hello, Non-UEFI world!").unwrap();
     println!("Hello, Non-UEFI world!");
+    let _exceptions = exceptions::init();
     loop {
         hlt()
     }
