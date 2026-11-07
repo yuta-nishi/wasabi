@@ -4,6 +4,7 @@ pub mod allocator;
 pub mod debug;
 pub mod graphics;
 pub mod init;
+pub mod paging;
 pub mod qemu;
 pub mod result;
 pub mod serial;
