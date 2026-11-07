@@ -58,3 +58,27 @@ macro_rules! println {
         $crate::serial::print_str("\n");
     }};
 }
+
+/// Logs an informational message with its source location.
+#[macro_export]
+macro_rules! info {
+    ($($arg:tt)*) => {
+        $crate::print!("[INFO]  {}:{:<3}: {}\n", file!(), line!(), format_args!($($arg)*))
+    };
+}
+
+/// Logs a warning with its source location.
+#[macro_export]
+macro_rules! warn {
+    ($($arg:tt)*) => {
+        $crate::print!("[WARN]  {}:{:<3}: {}\n", file!(), line!(), format_args!($($arg)*))
+    };
+}
+
+/// Logs an error with its source location.
+#[macro_export]
+macro_rules! error {
+    ($($arg:tt)*) => {
+        $crate::print!("[ERROR] {}:{:<3}: {}\n", file!(), line!(), format_args!($($arg)*))
+    };
+}

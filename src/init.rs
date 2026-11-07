@@ -1,7 +1,9 @@
 //! Startup steps that turn a UEFI application into a standalone OS.
 
 use crate::allocator::ALLOCATOR;
+use crate::info;
 use crate::uefi::EfiHandle;
+use crate::uefi::EfiMemoryType;
 use crate::uefi::EfiSystemTable;
 use crate::uefi::MemoryMapHolder;
 use crate::uefi::exit_from_efi_boot_services;
@@ -19,5 +21,10 @@ pub fn init_basic_runtime(
     let mut memory_map = MemoryMapHolder::new();
     exit_from_efi_boot_services(image_handle, efi_system_table, &mut memory_map);
     ALLOCATOR.init_with_mmap(&memory_map);
+    let regions = memory_map
+        .iter()
+        .filter(|e| e.memory_type() == EfiMemoryType::CONVENTIONAL_MEMORY)
+        .count();
+    info!("the heap is built from {regions} conventional-memory regions");
     memory_map
 }

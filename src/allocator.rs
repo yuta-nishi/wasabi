@@ -19,6 +19,7 @@ use core::cell::RefCell;
 use core::cmp::max;
 use core::fmt;
 use core::mem::size_of;
+use crate::warn;
 use core::ptr::null_mut;
 
 /// Rounds `v` up to a power of two: exact powers stay put, while `0` and
@@ -211,6 +212,7 @@ impl FirstFitAllocator {
             size = size.saturating_sub(4096);
         }
         if size <= 4096 {
+            warn!("skipping a {size}-byte conventional region (one page or less)");
             return;
         }
         // SAFETY: the descriptor covers `size` bytes of conventional memory at

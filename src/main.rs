@@ -4,6 +4,7 @@
 use core::fmt::Write;
 use core::panic::PanicInfo;
 use core::writeln;
+use wasabi::error;
 use wasabi::graphics::Bitmap;
 use wasabi::graphics::draw_test_pattern;
 use wasabi::graphics::fill_rect;
@@ -54,6 +55,6 @@ extern "efiapi" fn efi_main(
 
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
-    println!("{info}");
+    error!("{info}");
     exit_qemu(QemuExitCode::Fail);
 }
