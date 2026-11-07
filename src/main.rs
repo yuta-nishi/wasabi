@@ -8,6 +8,7 @@ use wasabi::allocator::ALLOCATOR;
 use wasabi::graphics::Bitmap;
 use wasabi::graphics::draw_test_pattern;
 use wasabi::graphics::fill_rect;
+use wasabi::println;
 use wasabi::qemu::QemuExitCode;
 use wasabi::qemu::exit_qemu;
 use wasabi::uefi::EfiHandle;
@@ -58,12 +59,14 @@ extern "efiapi" fn efi_main(
     // memory, so the heap is only carved out of the now-frozen map.
     ALLOCATOR.init_with_mmap(&memory_map);
     writeln!(w, "Hello, Non-UEFI world!").unwrap();
+    println!("Hello, Non-UEFI world!");
     loop {
         hlt()
     }
 }
 
 #[panic_handler]
-fn panic(_info: &PanicInfo) -> ! {
+fn panic(info: &PanicInfo) -> ! {
+    println!("{info}");
     exit_qemu(QemuExitCode::Fail);
 }
