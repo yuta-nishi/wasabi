@@ -6,6 +6,7 @@ use core::panic::PanicInfo;
 use core::writeln;
 use wasabi::error;
 use wasabi::exceptions;
+use wasabi::info;
 use wasabi::graphics::Bitmap;
 use wasabi::graphics::draw_test_pattern;
 use wasabi::graphics::fill_rect;
@@ -20,6 +21,7 @@ use wasabi::uefi::EfiStatus;
 use wasabi::uefi::EfiSystemTable;
 use wasabi::uefi::VramTextWriter;
 use wasabi::uefi::init_vram;
+use wasabi::uefi::locate_loaded_image_protocol;
 use wasabi::x86::hlt;
 
 #[unsafe(no_mangle)]
@@ -33,6 +35,12 @@ extern "efiapi" fn efi_main(
     fill_rect(&mut vram, 0x000000, 0, 0, vw, vh).expect("fill_rect failed");
     draw_test_pattern(&mut vram);
     let mut w = VramTextWriter::new(&mut vram);
+    let loaded_image = locate_loaded_image_protocol(image_handle, efi_system_table)
+        .expect("locate_loaded_image_protocol failed");
+    info!(
+        "image: base={:#018x} size={:#x}",
+        loaded_image.image_base as usize, loaded_image.image_size
+    );
     let memory_map = init_basic_runtime(image_handle, efi_system_table);
     let mut total_memory_pages = 0;
     for e in memory_map.iter() {
