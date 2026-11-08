@@ -34,9 +34,6 @@ extern "efiapi" fn efi_main(
     draw_test_pattern(&mut vram);
     let mut w = VramTextWriter::new(&mut vram);
     let memory_map = init_basic_runtime(image_handle, efi_system_table);
-    paging::dump_root();
-    paging::dump_translation(0);
-    paging::dump_translation(efi_main as *const () as usize as u64);
     let mut total_memory_pages = 0;
     for e in memory_map.iter() {
         if e.memory_type() != EfiMemoryType::CONVENTIONAL_MEMORY {
@@ -54,6 +51,9 @@ extern "efiapi" fn efi_main(
     writeln!(w, "Hello, Non-UEFI world!").unwrap();
     println!("Hello, Non-UEFI world!");
     let _exceptions = exceptions::init();
+    paging::dump_root();
+    paging::dump_translation(0);
+    paging::dump_translation(efi_main as *const () as usize as u64);
     loop {
         hlt()
     }
