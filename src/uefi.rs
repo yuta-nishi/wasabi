@@ -22,6 +22,13 @@ struct EfiGuid {
     pub data3: [u8; 8],
 }
 
+const EFI_LOADED_IMAGE_PROTOCOL_GUID: EfiGuid = EfiGuid {
+    data0: 0x5b1b31a1,
+    data1: 0x9562,
+    data2: 0x11d2,
+    data3: [0x8e, 0x3f, 0x00, 0xa0, 0xc9, 0x69, 0x72, 0x3b],
+};
+
 const EFI_GRAPHICS_OUTPUT_PROTOCOL_GUID: EfiGuid = EfiGuid {
     data0: 0x9042a9de,
     data1: 0x23dc,
@@ -152,6 +159,13 @@ type GetMemoryMapFn = extern "efiapi" fn(
 type ExitBootServicesFn =
     extern "efiapi" fn(image_handle: EfiHandle, map_key: usize) -> EfiStatus;
 
+/// `EFI_BOOT_SERVICES.HandleProtocol` (UEFI spec 7.3.12).
+type HandleProtocolFn = extern "efiapi" fn(
+    handle: EfiHandle,
+    protocol: *const EfiGuid,
+    out_interface: Out<*mut c_void>,
+) -> EfiStatus;
+
 /// `EFI_BOOT_SERVICES.LocateProtocol` (UEFI spec 7.3.16).
 ///
 /// `registration` is OPTIONAL: pass null to locate a protocol without
@@ -166,12 +180,15 @@ type LocateProtocolFn = extern "efiapi" fn(
 pub struct EfiBootServicesTable {
     _reserved0: [u64; 7],
     get_memory_map_fn: GetMemoryMapFn,
-    _reserved1: [u64; 21],
+    _reserved1: [u64; 11],
+    handle_protocol_fn: HandleProtocolFn,
+    _reserved2: [u64; 9],
     exit_boot_services_fn: ExitBootServicesFn,
-    _reserved2: [u64; 10],
+    _reserved3: [u64; 10],
     locate_protocol_fn: LocateProtocolFn,
 }
 const _: () = assert!(offset_of!(EfiBootServicesTable, get_memory_map_fn) == 56);
+const _: () = assert!(offset_of!(EfiBootServicesTable, handle_protocol_fn) == 152);
 const _: () = assert!(offset_of!(EfiBootServicesTable, exit_boot_services_fn) == 232);
 const _: () = assert!(offset_of!(EfiBootServicesTable, locate_protocol_fn) == 320);
 
@@ -186,6 +203,28 @@ impl EfiBootServicesTable {
             &mut map.descriptor_size,
             &mut map.descriptor_version,
         )
+    }
+
+    /// Borrows the `protocol` interface attached to `handle`.
+    ///
+    /// # Safety
+    ///
+    /// Same contract as [`Self::locate_protocol`].
+    unsafe fn handle_protocol<'a, T>(
+        &self,
+        handle: EfiHandle,
+        protocol: &EfiGuid,
+    ) -> Option<&'a T> {
+        let mut out: *mut T = null_mut();
+        let handle_protocol_fn = self.handle_protocol_fn;
+        let status =
+            handle_protocol_fn(handle, protocol, &raw mut out as Out<*mut c_void>);
+        if status != EfiStatus::Success {
+            return None;
+        }
+        // SAFETY: written by the firmware on success; non-null is checked below.
+        let out = NonNull::new(out)?;
+        Some(unsafe { out.as_ref() })
     }
 
     /// Locates the protocol identified by `protocol` and borrows its interface.
@@ -247,6 +286,39 @@ struct EfiGraphicsOutputProtocolMode<'a> {
 struct EfiGraphicsOutputProtocol<'a> {
     reserved: [u64; 3],
     pub mode: &'a EfiGraphicsOutputProtocolMode<'a>,
+}
+
+/// `EFI_LOADED_IMAGE_PROTOCOL` (UEFI spec 9.2).
+#[repr(C)]
+pub struct EfiLoadedImageProtocol {
+    revision: u32,
+    parent_handle: EfiHandle,
+    system_table: *mut c_void,
+    device_handle: EfiHandle,
+    file_path: *mut c_void,
+    _reserved: *mut c_void,
+    load_options_size: u32,
+    load_options: *mut c_void,
+    /// Where the firmware loaded this image, and how big it is.
+    pub image_base: *mut c_void,
+    pub image_size: u64,
+    image_code_type: u32,
+    image_data_type: u32,
+    unload: *mut c_void,
+}
+
+/// The `LoadedImage` protocol of the running image: its base address and size.
+pub fn locate_loaded_image_protocol<'a>(
+    image_handle: EfiHandle,
+    efi_system_table: &EfiSystemTable,
+) -> Result<&'a EfiLoadedImageProtocol> {
+    // SAFETY: the protocol is owned by the firmware and outlives this program.
+    unsafe {
+        efi_system_table
+            .boot_services
+            .handle_protocol(image_handle, &EFI_LOADED_IMAGE_PROTOCOL_GUID)
+    }
+    .ok_or("Failed to locate the loaded image protocol")
 }
 
 fn locate_graphic_protocol<'a>(

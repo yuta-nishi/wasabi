@@ -1,5 +1,3 @@
-//! Tests for the debug printing helpers.
-
 extern crate alloc;
 
 use alloc::format;
