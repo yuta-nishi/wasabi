@@ -1,12 +1,16 @@
 //! Interrupt Descriptor Table and the exception entry stubs.
 //!
-//! Every vector gets a small assembly stub. The breakpoint exception counts
-//! itself and returns to the interrupted code; anything else reports and stops
-//! the run.
+//! Every vector gets a small assembly stub. Each stub records what happened in
+//! the statics below before it hands over: the CPU pushed the interrupted RIP
+//! (and an error code for some vectors) when it entered the stub, so the values
+//! are read from the hardware frame before anything else is pushed.
+//!
+//! The breakpoint exception counts itself and returns to the interrupted code;
+//! anything else reports and stops the run.
 
+use crate::error;
 use crate::qemu::QemuExitCode;
 use crate::qemu::exit_qemu;
-use crate::serial::print_str;
 use crate::x86::DescriptorTablePointer;
 use alloc::boxed::Box;
 use core::arch::asm;
@@ -14,10 +18,17 @@ use core::arch::global_asm;
 use core::mem::size_of;
 use core::pin::Pin;
 use core::sync::atomic::AtomicU64;
+use core::sync::atomic::Ordering;
 
 /// How many breakpoint exceptions have been handled so far. It only grows, so a
 /// test can prove that the handler ran and that execution resumed.
 pub static BREAKPOINTS_HANDLED: AtomicU64 = AtomicU64::new(0);
+/// Vector of the exception the stubs last handed over.
+pub static LAST_VECTOR: AtomicU64 = AtomicU64::new(0);
+/// Error code the CPU pushed for that exception (`0` when it pushes none).
+pub static LAST_ERROR: AtomicU64 = AtomicU64::new(0);
+/// Address of the instruction that raised it.
+pub static LAST_RIP: AtomicU64 = AtomicU64::new(0);
 
 /// Present, DPL 0, 64-bit interrupt gate.
 const INTERRUPT_GATE: u8 = 0x8e;
@@ -25,6 +36,41 @@ const INTERRUPT_GATE: u8 = 0x8e;
 const INTERRUPT_STACK_INDEX: u8 = 1;
 
 const EXCEPTION_COUNT: usize = 32;
+
+const EXCEPTION_NAMES: [&str; EXCEPTION_COUNT] = [
+    "divide error",
+    "debug",
+    "non-maskable interrupt",
+    "breakpoint",
+    "overflow",
+    "bound range exceeded",
+    "invalid opcode",
+    "device not available",
+    "double fault",
+    "coprocessor segment overrun",
+    "invalid TSS",
+    "segment not present",
+    "stack-segment fault",
+    "general protection fault",
+    "page fault",
+    "reserved",
+    "x87 floating-point exception",
+    "alignment check",
+    "machine check",
+    "SIMD floating-point exception",
+    "virtualization exception",
+    "control protection exception",
+    "reserved",
+    "reserved",
+    "reserved",
+    "reserved",
+    "reserved",
+    "reserved",
+    "hypervisor injection exception",
+    "VMM communication exception",
+    "security exception",
+    "reserved",
+];
 
 #[derive(Clone, Copy)]
 #[repr(C)]
@@ -41,97 +87,133 @@ const _: () = assert!(size_of::<IdtDescriptor>() == 16);
 
 global_asm!(
     r#"
-    // Every exception except the breakpoint ends the run.
-    .macro isr_fatal n
-    .globl isr_\n
-    isr_\n:
-        push 0
-        push \n
-        jmp isr_fatal_common
+    // Vectors that push no error code: the hardware frame starts with RIP.
+    .macro isr n
+    .globl wasabi_isr_\n
+    wasabi_isr_\n:
+        push rax
+        mov eax, \n
+        mov qword ptr [rip + {vector}], rax
+        mov rax, qword ptr [rsp + 8]
+        mov qword ptr [rip + {rip}], rax
+        mov qword ptr [rip + {error}], 0
+        pop rax
+        jmp wasabi_isr_common
     .endm
 
-    isr_fatal 0
-    isr_fatal 1
-    isr_fatal 2
-    isr_fatal 4
-    isr_fatal 5
-    isr_fatal 6
-    isr_fatal 7
-    isr_fatal 8
-    isr_fatal 9
-    isr_fatal 10
-    isr_fatal 11
-    isr_fatal 12
-    isr_fatal 13
-    isr_fatal 14
-    isr_fatal 15
-    isr_fatal 16
-    isr_fatal 17
-    isr_fatal 18
-    isr_fatal 19
-    isr_fatal 20
-    isr_fatal 21
-    isr_fatal 22
-    isr_fatal 23
-    isr_fatal 24
-    isr_fatal 25
-    isr_fatal 26
-    isr_fatal 27
-    isr_fatal 28
-    isr_fatal 29
-    isr_fatal 30
-    isr_fatal 31
+    // Vectors that push an error code: it comes first on the stack.
+    .macro isr_err n
+    .globl wasabi_isr_\n
+    wasabi_isr_\n:
+        push rax
+        mov eax, \n
+        mov qword ptr [rip + {vector}], rax
+        mov rax, qword ptr [rsp + 8]
+        mov qword ptr [rip + {error}], rax
+        mov rax, qword ptr [rsp + 16]
+        mov qword ptr [rip + {rip}], rax
+        pop rax
+        jmp wasabi_isr_common
+    .endm
 
-    // The breakpoint exception only counts itself and resumes. The CPU pushed
-    // the return frame, so a bare `iretq` is enough. The counter is addressed
-    // relative to RIP: an absolute symbol address does not fit in 32 bits.
-    .globl isr_3
-    isr_3:
+    isr     0
+    isr     1
+    isr     2
+    isr     4
+    isr     5
+    isr     6
+    isr     7
+    isr_err 8
+    isr     9
+    isr_err 10
+    isr_err 11
+    isr_err 12
+    isr_err 13
+    isr_err 14
+    isr     15
+    isr     16
+    isr_err 17
+    isr     18
+    isr     19
+    isr     20
+    isr_err 21
+    isr     22
+    isr     23
+    isr     24
+    isr     25
+    isr     26
+    isr     27
+    isr     28
+    isr_err 29
+    isr_err 30
+    isr     31
+
+    // The breakpoint exception only counts itself and resumes.
+    .globl wasabi_isr_3
+    wasabi_isr_3:
+        push rax
+        mov eax, 3
+        mov qword ptr [rip + {vector}], rax
+        mov rax, qword ptr [rsp + 8]
+        mov qword ptr [rip + {rip}], rax
+        mov qword ptr [rip + {error}], 0
+        pop rax
         lock inc qword ptr [rip + {breakpoints}]
         iretq
 
-    .globl isr_fatal_common
-    isr_fatal_common:
+    .globl wasabi_isr_common
+    wasabi_isr_common:
         and rsp, -16
         call {fatal}
+        ud2
+
+    // The IDT entries are filled from this table, so the stubs are listed once.
+    .section .rodata
+    .globl wasabi_isr_table
+    wasabi_isr_table:
+        .quad wasabi_isr_0
+        .quad wasabi_isr_1
+        .quad wasabi_isr_2
+        .quad wasabi_isr_3
+        .quad wasabi_isr_4
+        .quad wasabi_isr_5
+        .quad wasabi_isr_6
+        .quad wasabi_isr_7
+        .quad wasabi_isr_8
+        .quad wasabi_isr_9
+        .quad wasabi_isr_10
+        .quad wasabi_isr_11
+        .quad wasabi_isr_12
+        .quad wasabi_isr_13
+        .quad wasabi_isr_14
+        .quad wasabi_isr_15
+        .quad wasabi_isr_16
+        .quad wasabi_isr_17
+        .quad wasabi_isr_18
+        .quad wasabi_isr_19
+        .quad wasabi_isr_20
+        .quad wasabi_isr_21
+        .quad wasabi_isr_22
+        .quad wasabi_isr_23
+        .quad wasabi_isr_24
+        .quad wasabi_isr_25
+        .quad wasabi_isr_26
+        .quad wasabi_isr_27
+        .quad wasabi_isr_28
+        .quad wasabi_isr_29
+        .quad wasabi_isr_30
+        .quad wasabi_isr_31
     "#,
+    vector = sym LAST_VECTOR,
+    error = sym LAST_ERROR,
+    rip = sym LAST_RIP,
     breakpoints = sym BREAKPOINTS_HANDLED,
     fatal = sym fatal_exception,
 );
 
 unsafe extern "C" {
-    fn isr_0();
-    fn isr_1();
-    fn isr_2();
-    fn isr_3();
-    fn isr_4();
-    fn isr_5();
-    fn isr_6();
-    fn isr_7();
-    fn isr_8();
-    fn isr_9();
-    fn isr_10();
-    fn isr_11();
-    fn isr_12();
-    fn isr_13();
-    fn isr_14();
-    fn isr_15();
-    fn isr_16();
-    fn isr_17();
-    fn isr_18();
-    fn isr_19();
-    fn isr_20();
-    fn isr_21();
-    fn isr_22();
-    fn isr_23();
-    fn isr_24();
-    fn isr_25();
-    fn isr_26();
-    fn isr_27();
-    fn isr_28();
-    fn isr_29();
-    fn isr_30();
-    fn isr_31();
+    #[link_name = "wasabi_isr_table"]
+    static ISR_TABLE: [unsafe extern "C" fn(); EXCEPTION_COUNT];
 }
 
 impl IdtDescriptor {
@@ -168,15 +250,10 @@ pub struct Idt {
 
 impl Idt {
     pub fn new(selector: u16) -> Self {
-        const STUBS: [unsafe extern "C" fn(); EXCEPTION_COUNT] = [
-            isr_0, isr_1, isr_2, isr_3, isr_4, isr_5, isr_6, isr_7, isr_8, isr_9, isr_10,
-            isr_11, isr_12, isr_13, isr_14, isr_15, isr_16, isr_17, isr_18, isr_19,
-            isr_20, isr_21, isr_22, isr_23, isr_24, isr_25, isr_26, isr_27, isr_28,
-            isr_29, isr_30, isr_31,
-        ];
-
         let mut entries = [IdtDescriptor::missing(); 0x100];
-        for (vector, stub) in STUBS.iter().enumerate() {
+        // SAFETY: the table is defined next to the stubs and counts them.
+        let stubs = unsafe { ISR_TABLE };
+        for (vector, stub) in stubs.iter().enumerate() {
             entries[vector] = IdtDescriptor::interrupt(*stub, selector);
         }
         Self {
@@ -199,6 +276,12 @@ impl Idt {
 /// Reports an unexpected exception and stops the run. It is called from
 /// assembly, so it takes no arguments and never returns.
 extern "C" fn fatal_exception() {
-    print_str("unexpected exception; stopping\n");
+    let vector = LAST_VECTOR.load(Ordering::Relaxed);
+    let error_code = LAST_ERROR.load(Ordering::Relaxed);
+    let rip = LAST_RIP.load(Ordering::Relaxed);
+    let name = EXCEPTION_NAMES
+        .get(vector as usize)
+        .unwrap_or(&"unknown exception");
+    error!("exception #{vector:02} ({name}) at {rip:#018x}, error code {error_code:#x}");
     exit_qemu(QemuExitCode::Fail);
 }
