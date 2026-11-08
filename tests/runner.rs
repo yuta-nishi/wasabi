@@ -9,6 +9,8 @@ mod allocator;
 mod debug;
 #[path = "runner/interrupts.rs"]
 mod interrupts;
+#[path = "runner/paging.rs"]
+mod paging;
 
 use core::panic::PanicInfo;
 use wasabi::error;
@@ -56,6 +58,18 @@ extern "efiapi" fn efi_main(
         (
             "breakpoint_resumes_execution",
             interrupts::breakpoint_resumes_execution,
+        ),
+        (
+            "four_level_walk_finds_a_4k_frame",
+            paging::four_level_walk_finds_a_4k_frame,
+        ),
+        (
+            "huge_page_ends_the_walk_early",
+            paging::huge_page_ends_the_walk_early,
+        ),
+        (
+            "missing_entry_reports_not_mapped",
+            paging::missing_entry_reports_not_mapped,
         ),
     ])
 }
