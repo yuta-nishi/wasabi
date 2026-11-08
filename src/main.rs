@@ -6,11 +6,12 @@ use core::panic::PanicInfo;
 use core::writeln;
 use wasabi::error;
 use wasabi::exceptions;
-use wasabi::info;
 use wasabi::graphics::Bitmap;
 use wasabi::graphics::draw_test_pattern;
 use wasabi::graphics::fill_rect;
+use wasabi::info;
 use wasabi::init::init_basic_runtime;
+use wasabi::init::init_paging;
 use wasabi::paging;
 use wasabi::println;
 use wasabi::qemu::QemuExitCode;
@@ -62,6 +63,11 @@ extern "efiapi" fn efi_main(
     paging::dump_root();
     paging::dump_translation(0);
     paging::dump_translation(efi_main as *const () as usize as u64);
+
+    let tables = init_paging(&memory_map);
+    tables.switch();
+    info!("paging: switched to our own tables");
+    paging::dump_root();
     loop {
         hlt()
     }

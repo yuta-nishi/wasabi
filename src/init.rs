@@ -2,6 +2,8 @@
 
 use crate::allocator::ALLOCATOR;
 use crate::info;
+use crate::paging::PAGE_SIZE;
+use crate::paging::PageTables;
 use crate::uefi::EfiHandle;
 use crate::uefi::EfiMemoryType;
 use crate::uefi::EfiSystemTable;
@@ -27,4 +29,18 @@ pub fn init_basic_runtime(
         .count();
     info!("the heap is built from {regions} conventional-memory regions");
     memory_map
+}
+
+/// Builds page tables that identity-map the memory this OS uses and everything
+/// below 4 GiB (which also covers the firmware's MMIO).
+pub fn init_paging(memory_map: &MemoryMapHolder) -> PageTables {
+    let mut end = 0x1_0000_0000u64;
+    for e in memory_map.iter() {
+        if e.memory_type() == EfiMemoryType::CONVENTIONAL_MEMORY {
+            end = end.max(e.physical_start() + e.number_of_pages() * PAGE_SIZE);
+        }
+    }
+    let tables = PageTables::identity_map(end);
+    info!("paging: identity-mapped 0..{end:#x} with our own tables");
+    tables
 }
