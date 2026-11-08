@@ -14,5 +14,10 @@ pub fn breakpoint_resumes_execution() {
     let after = BREAKPOINTS_HANDLED.load(Ordering::Relaxed);
     assert_eq!(after, before + 1);
     assert_eq!(LAST_VECTOR.load(Ordering::Relaxed), 3);
-    assert_ne!(LAST_RIP.load(Ordering::Relaxed), 0);
+
+    // A breakpoint is a trap: the CPU reports the address *after* `int3`, so the
+    // byte just before the saved RIP must be the 0xcc opcode itself.
+    let rip = LAST_RIP.load(Ordering::Relaxed);
+    let just_executed = unsafe { *(rip as *const u8).sub(1) };
+    assert_eq!(just_executed, 0xcc);
 }
