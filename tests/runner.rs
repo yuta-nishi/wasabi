@@ -71,6 +71,10 @@ extern "efiapi" fn efi_main(
             "missing_entry_reports_not_mapped",
             paging::missing_entry_reports_not_mapped,
         ),
+        (
+            "new_tables_map_requested_pages",
+            paging::new_tables_map_requested_pages,
+        ),
     ])
 }
 
