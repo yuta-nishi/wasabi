@@ -6,6 +6,7 @@
 //! dropped.
 
 use alloc::boxed::Box;
+use crate::x86::DescriptorTablePointer;
 use core::arch::asm;
 use core::mem::size_of;
 use core::pin::Pin;
@@ -51,13 +52,6 @@ struct GdtBacking {
     tss_high: u64,
 }
 const _: () = assert!(size_of::<GdtBacking>() == 5 * 8);
-
-#[repr(C, packed)]
-struct DescriptorTablePointer {
-    limit: u16,
-    base: u64,
-}
-const _: () = assert!(size_of::<DescriptorTablePointer>() == 10);
 
 /// Low half of a 64-bit TSS descriptor: present, type 0x9 (available TSS).
 const fn tss_low(base: u64, limit: u32) -> u64 {

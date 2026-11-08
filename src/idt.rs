@@ -7,6 +7,7 @@
 use crate::qemu::QemuExitCode;
 use crate::qemu::exit_qemu;
 use crate::serial::print_str;
+use crate::x86::DescriptorTablePointer;
 use alloc::boxed::Box;
 use core::arch::asm;
 use core::arch::global_asm;
@@ -37,13 +38,6 @@ struct IdtDescriptor {
     _reserved: u32,
 }
 const _: () = assert!(size_of::<IdtDescriptor>() == 16);
-
-#[repr(C, packed)]
-struct DescriptorTablePointer {
-    limit: u16,
-    base: u64,
-}
-const _: () = assert!(size_of::<DescriptorTablePointer>() == 10);
 
 global_asm!(
     r#"
@@ -175,9 +169,10 @@ pub struct Idt {
 impl Idt {
     pub fn new(selector: u16) -> Self {
         const STUBS: [unsafe extern "C" fn(); EXCEPTION_COUNT] = [
-            isr_0, isr_1, isr_2, isr_3, isr_4, isr_5, isr_6, isr_7, isr_8, isr_9, isr_10, isr_11,
-            isr_12, isr_13, isr_14, isr_15, isr_16, isr_17, isr_18, isr_19, isr_20, isr_21, isr_22,
-            isr_23, isr_24, isr_25, isr_26, isr_27, isr_28, isr_29, isr_30, isr_31,
+            isr_0, isr_1, isr_2, isr_3, isr_4, isr_5, isr_6, isr_7, isr_8, isr_9, isr_10,
+            isr_11, isr_12, isr_13, isr_14, isr_15, isr_16, isr_17, isr_18, isr_19,
+            isr_20, isr_21, isr_22, isr_23, isr_24, isr_25, isr_26, isr_27, isr_28,
+            isr_29, isr_30, isr_31,
         ];
 
         let mut entries = [IdtDescriptor::missing(); 0x100];
