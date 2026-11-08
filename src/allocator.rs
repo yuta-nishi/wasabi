@@ -12,6 +12,7 @@ use crate::result::Result;
 use crate::uefi::EfiMemoryDescriptor;
 use crate::uefi::EfiMemoryType;
 use crate::uefi::MemoryMapHolder;
+use crate::warn;
 use alloc::alloc::GlobalAlloc;
 use alloc::alloc::Layout;
 use alloc::boxed::Box;
@@ -19,7 +20,6 @@ use core::cell::RefCell;
 use core::cmp::max;
 use core::fmt;
 use core::mem::size_of;
-use crate::warn;
 use core::ptr::null_mut;
 
 /// Rounds `v` up to a power of two: exact powers stay put, while `0` and

@@ -171,7 +171,8 @@ impl fmt::Display for Flags {
 }
 
 fn print_step(step: &Step) {
-    let (level, index, start, end) = (step.level.name(), step.index, step.start, step.end);
+    let (level, index, start, end) =
+        (step.level.name(), step.index, step.start, step.end);
     if !step.entry.present() {
         info!("  {level}[{index:03}] {start:#018x}..{end:#018x} -> not present");
     } else if step.entry.huge() {

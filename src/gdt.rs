@@ -5,8 +5,8 @@
 //! here is referenced by address, so the owners are returned instead of being
 //! dropped.
 
-use alloc::boxed::Box;
 use crate::x86::DescriptorTablePointer;
+use alloc::boxed::Box;
 use core::arch::asm;
 use core::mem::size_of;
 use core::pin::Pin;

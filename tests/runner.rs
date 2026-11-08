@@ -14,9 +14,9 @@ mod paging;
 
 use core::panic::PanicInfo;
 use wasabi::error;
+use wasabi::init::init_basic_runtime;
 use wasabi::qemu::QemuExitCode;
 use wasabi::qemu::exit_qemu;
-use wasabi::init::init_basic_runtime;
 use wasabi::test_runner::run_tests;
 use wasabi::uefi::EfiHandle;
 use wasabi::uefi::EfiStatus;

@@ -18,5 +18,8 @@ pub fn init() -> Exceptions {
     let idt = Idt::new(KERNEL_CODE_SELECTOR);
     idt.load();
     info!("exceptions installed");
-    Exceptions { _gdt: gdt, _idt: idt }
+    Exceptions {
+        _gdt: gdt,
+        _idt: idt,
+    }
 }
