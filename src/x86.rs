@@ -22,6 +22,14 @@ pub fn read_io_port_u8(port: u16) -> u8 {
     data
 }
 
+pub fn read_cr2() -> u64 {
+    let value: u64;
+    unsafe {
+        asm!("mov {}, cr2", out(reg) value)
+    }
+    value
+}
+
 pub fn read_cr3() -> u64 {
     let value: u64;
     unsafe { asm!("mov {}, cr3", out(reg) value) }

@@ -12,6 +12,7 @@ use crate::error;
 use crate::qemu::QemuExitCode;
 use crate::qemu::exit_qemu;
 use crate::x86::DescriptorTablePointer;
+use crate::x86::read_cr2;
 use alloc::boxed::Box;
 use core::arch::asm;
 use core::arch::global_asm;
@@ -282,6 +283,9 @@ extern "C" fn fatal_exception() {
     let name = EXCEPTION_NAMES
         .get(vector as usize)
         .unwrap_or(&"unknown exception");
-    error!("exception #{vector:02} ({name}) at {rip:#018x}, error code {error_code:#x}");
+    error!(
+        "exception #{vector:02} ({name}) at {rip:#018x}, error code {error_code:#x}, cr2={:#018x}",
+        read_cr2()
+    );
     exit_qemu(QemuExitCode::Fail);
 }
