@@ -70,3 +70,19 @@ pub fn new_tables_map_requested_pages() {
         other => panic!("page 0x3000: {other:?}"),
     }
 }
+
+pub fn unmapping_page_zero_leaves_it_not_mapped() {
+    let mut tables = PageTables::new();
+    tables.map_page(0, 0);
+    tables.map_page(0x1000, 0x1000);
+    tables.unmap_page(0);
+
+    match translate_in(tables.root(), 0) {
+        Translation::NotMapped(_) => {}
+        other => panic!("page 0: {other:?}"),
+    }
+    match translate_in(tables.root(), 0x1000) {
+        Translation::Page(_, physical) => assert_eq!(physical, 0x1000),
+        other => panic!("page 0x1000: {other:?}"),
+    }
+}

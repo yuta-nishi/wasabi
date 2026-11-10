@@ -207,24 +207,50 @@ impl PageTables {
             "physical address alignment"
         );
 
+        let (table, index) = self
+            .pt_and_index(virtual_address, true)
+            .expect("walking with allocation always reaches a PT");
+        // SAFETY: `table` points at the PT `pt_and_index` just returned.
+        unsafe {
+            (*table).entries_mut()[index] =
+                Entry::from_raw(physical_address | PRESENT | WRITABLE)
+        };
+    }
+
+    /// Clears the mapping for one page, so touching it faults.
+    pub fn unmap_page(&mut self, virtual_address: u64) {
+        assert_eq!(virtual_address % PAGE_SIZE, 0, "virtual address alignment");
+
+        let Some((table, index)) = self.pt_and_index(virtual_address, false) else {
+            return;
+        };
+        // SAFETY: `table` points at the PT that holds this page.
+        unsafe { (*table).entries_mut()[index] = Entry::from_raw(0) };
+    }
+
+    /// Walks down to the PT that holds `address`, allocating missing levels
+    /// when `allocate` is set, and returns that table with the entry index.
+    fn pt_and_index(
+        &mut self,
+        address: u64,
+        allocate: bool,
+    ) -> Option<(*mut Table, usize)> {
         let mut table: *mut Table = &mut *self.pml4;
         for level in [Level::Pml4, Level::Pdpt, Level::Pd] {
-            let index = ((virtual_address >> level.shift()) & 0x1ff) as usize;
+            let index = ((address >> level.shift()) & 0x1ff) as usize;
             // SAFETY: `table` points at a table owned by this address space.
             let entry = unsafe { &mut (*table).entries_mut()[index] };
             if !entry.present() {
+                if !allocate {
+                    return None;
+                }
                 let next = Box::into_raw(Table::zeroed());
                 *entry = Entry::from_raw(next as u64 | PRESENT | WRITABLE);
             }
             table = entry.address() as *mut Table;
         }
-
-        let index = ((virtual_address >> Level::Pt.shift()) & 0x1ff) as usize;
-        // SAFETY: as above; the PT is present by now.
-        unsafe {
-            (*table).entries_mut()[index] =
-                Entry::from_raw(physical_address | PRESENT | WRITABLE)
-        };
+        let index = ((address >> Level::Pt.shift()) & 0x1ff) as usize;
+        Some((table, index))
     }
 
     /// The root of the tree, for `translate_in`.

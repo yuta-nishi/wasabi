@@ -75,6 +75,10 @@ extern "efiapi" fn efi_main(
             "new_tables_map_requested_pages",
             paging::new_tables_map_requested_pages,
         ),
+        (
+            "unmapping_page_zero_leaves_it_not_mapped",
+            paging::unmapping_page_zero_leaves_it_not_mapped,
+        ),
     ])
 }
 
