@@ -24,10 +24,12 @@ pub fn read_io_port_u8(port: u16) -> u8 {
 
 pub fn read_cr2() -> u64 {
     let value: u64;
-    unsafe {
-        asm!("mov {}, cr2", out(reg) value)
-    }
+    unsafe { asm!("mov {}, cr2", out(reg) value) }
     value
+}
+
+pub fn write_cr3(value: u64) {
+    unsafe { asm!("mov cr3, {}", in(reg) value) }
 }
 
 pub fn read_cr3() -> u64 {

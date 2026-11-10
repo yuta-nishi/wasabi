@@ -7,16 +7,48 @@
 //!
 //! `translate_in` only reads memory and reports what it found, so the walk can
 //! be tested with hand-made tables; `dump_root` and `dump_translation` print the
-//! results for the tables `CR3` currently points at.
+//! results for the tables `CR3` currently points at. [`PageTables`] builds a
+//! fresh tree and can make it the active one.
 
 use crate::info;
 use crate::x86::read_cr3;
+use crate::x86::write_cr3;
+use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::fmt;
+use core::pin::Pin;
 
 /// Bits 12..51 of an entry hold the physical address of the next level.
 const ADDRESS_MASK: u64 = 0x000f_ffff_ffff_f000;
 const ENTRIES: usize = 512;
+
+/// Size of one page, and therefore of one table.
+pub const PAGE_SIZE: u64 = 4096;
+/// Present: the entry maps something.
+const PRESENT: u64 = 1 << 0;
+/// Writable: writes are allowed through this entry.
+const WRITABLE: u64 = 1 << 1;
+
+/// One page of entries. It must be page aligned: its address is stored in the
+/// high bits of the entry that points at it, so a misaligned table would put
+/// stray bits into the flag fields.
+#[repr(align(4096))]
+pub struct Table([Entry; ENTRIES]);
+
+impl Table {
+    /// A table with every entry not present.
+    pub fn zeroed() -> Box<Table> {
+        Box::new(Table([Entry::from_raw(0); ENTRIES]))
+    }
+
+    pub fn entries(&self) -> &[Entry] {
+        &self.0
+    }
+
+    pub fn entries_mut(&mut self) -> &mut [Entry] {
+        &mut self.0
+    }
+}
 
 /// One entry of any level, as it appears in memory.
 #[derive(Clone, Copy, Debug)]
@@ -31,7 +63,7 @@ impl Entry {
         self.0
     }
     pub const fn present(self) -> bool {
-        self.0 & 1 != 0
+        self.0 & PRESENT != 0
     }
     pub const fn huge(self) -> bool {
         self.0 & (1 << 7) != 0
@@ -132,6 +164,107 @@ pub fn translate(address: u64) -> Translation {
     translate_in(root(), address)
 }
 
+/// A page table tree that this program built.
+///
+/// The lower tables are leaked on purpose: once the CPU can reach a table it
+/// must stay where it is, and the tree is never torn down. The PML4 is pinned
+/// for the same reason, because its address ends up in `CR3`.
+pub struct PageTables {
+    pml4: Pin<Box<Table>>,
+}
+
+impl Default for PageTables {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl PageTables {
+    /// Creates an empty tree with every entry not present.
+    pub fn new() -> Self {
+        Self {
+            pml4: Box::pin(*Table::zeroed()),
+        }
+    }
+
+    /// Maps `0..end` at the same physical addresses, one 4 KiB page at a time.
+    pub fn identity_map(end: u64) -> Self {
+        let mut tables = Self::new();
+        let mut address = 0;
+        while address < end {
+            tables.map_page(address, address);
+            address += PAGE_SIZE;
+        }
+        tables
+    }
+
+    /// Maps one page, allocating the tables on the way down.
+    pub fn map_page(&mut self, virtual_address: u64, physical_address: u64) {
+        assert_eq!(virtual_address % PAGE_SIZE, 0, "virtual address alignment");
+        assert_eq!(
+            physical_address % PAGE_SIZE,
+            0,
+            "physical address alignment"
+        );
+
+        let (table, index) = self
+            .pt_and_index(virtual_address, true)
+            .expect("walking with allocation always reaches a PT");
+        // SAFETY: `table` points at the PT `pt_and_index` just returned.
+        unsafe {
+            (*table).entries_mut()[index] =
+                Entry::from_raw(physical_address | PRESENT | WRITABLE)
+        };
+    }
+
+    /// Clears the mapping for one page, so touching it faults.
+    pub fn unmap_page(&mut self, virtual_address: u64) {
+        assert_eq!(virtual_address % PAGE_SIZE, 0, "virtual address alignment");
+
+        let Some((table, index)) = self.pt_and_index(virtual_address, false) else {
+            return;
+        };
+        // SAFETY: `table` points at the PT that holds this page.
+        unsafe { (*table).entries_mut()[index] = Entry::from_raw(0) };
+    }
+
+    /// Walks down to the PT that holds `address`, allocating missing levels
+    /// when `allocate` is set, and returns that table with the entry index.
+    fn pt_and_index(
+        &mut self,
+        address: u64,
+        allocate: bool,
+    ) -> Option<(*mut Table, usize)> {
+        let mut table: *mut Table = &mut *self.pml4;
+        for level in [Level::Pml4, Level::Pdpt, Level::Pd] {
+            let index = ((address >> level.shift()) & 0x1ff) as usize;
+            // SAFETY: `table` points at a table owned by this address space.
+            let entry = unsafe { &mut (*table).entries_mut()[index] };
+            if !entry.present() {
+                if !allocate {
+                    return None;
+                }
+                let next = Box::into_raw(Table::zeroed());
+                *entry = Entry::from_raw(next as u64 | PRESENT | WRITABLE);
+            }
+            table = entry.address() as *mut Table;
+        }
+        let index = ((address >> Level::Pt.shift()) & 0x1ff) as usize;
+        Some((table, index))
+    }
+
+    /// The root of the tree, for `translate_in`.
+    pub fn root(&self) -> &[Entry] {
+        self.pml4.entries()
+    }
+
+    /// Makes this tree the active one by loading its PML4 into `CR3`.
+    pub fn switch(&self) {
+        // The tree lives for the rest of the run and is never moved.
+        write_cr3(self.root().as_ptr() as u64);
+    }
+}
+
 fn root() -> &'static [Entry] {
     let address = (read_cr3() & ADDRESS_MASK) as *const Entry;
     // SAFETY: CR3 points at the PML4 the CPU is currently using.
@@ -192,7 +325,7 @@ fn print_step(step: &Step) {
 /// Prints the present entries of the root (PML4) table.
 pub fn dump_root() {
     info!(
-        "paging: cr3 = {:#018x} (the PML4 the firmware set up)",
+        "paging: cr3 = {:#018x} (the active PML4)",
         read_cr3() & ADDRESS_MASK
     );
     let shift = Level::Pml4.shift();
