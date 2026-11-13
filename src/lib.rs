@@ -5,6 +5,7 @@ extern crate alloc;
 pub mod allocator;
 pub mod debug;
 pub mod exceptions;
+pub mod executor;
 pub mod gdt;
 pub mod graphics;
 pub mod idt;
