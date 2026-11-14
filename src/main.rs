@@ -6,6 +6,8 @@ use core::panic::PanicInfo;
 use core::writeln;
 use wasabi::error;
 use wasabi::exceptions;
+use wasabi::executor::Executor;
+use wasabi::executor::yield_now;
 use wasabi::graphics::Bitmap;
 use wasabi::graphics::draw_test_pattern;
 use wasabi::graphics::fill_rect;
@@ -23,7 +25,6 @@ use wasabi::uefi::EfiSystemTable;
 use wasabi::uefi::VramTextWriter;
 use wasabi::uefi::init_vram;
 use wasabi::uefi::locate_loaded_image_protocol;
-use wasabi::x86::hlt;
 
 #[unsafe(no_mangle)]
 extern "efiapi" fn efi_main(
@@ -68,10 +69,26 @@ extern "efiapi" fn efi_main(
     tables.switch();
     info!("paging: switched to our own tables");
     paging::dump_root();
-    loop {
-        hlt()
-    }
+
+    EXECUTOR.spawn(async {
+        for step in 0..3 {
+            info!("task a: step {step}");
+            yield_now().await;
+        }
+        info!("task a: done");
+    });
+    EXECUTOR.spawn(async {
+        for step in 0..3 {
+            info!("task b: step {step}");
+            yield_now().await;
+        }
+        info!("task b: done");
+    });
+    EXECUTOR.run()
 }
+
+/// The executor the OS runs its tasks on.
+static EXECUTOR: Executor = Executor::new();
 
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {

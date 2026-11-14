@@ -7,6 +7,8 @@
 mod allocator;
 #[path = "runner/debug.rs"]
 mod debug;
+#[path = "runner/executor.rs"]
+mod executor;
 #[path = "runner/interrupts.rs"]
 mod interrupts;
 #[path = "runner/paging.rs"]
@@ -78,6 +80,14 @@ extern "efiapi" fn efi_main(
         (
             "unmapping_page_zero_leaves_it_not_mapped",
             paging::unmapping_page_zero_leaves_it_not_mapped,
+        ),
+        (
+            "executor_runs_every_task_to_completion",
+            executor::executor_runs_every_task_to_completion,
+        ),
+        (
+            "yielding_lets_another_task_run",
+            executor::yielding_lets_another_task_run,
         ),
     ])
 }
