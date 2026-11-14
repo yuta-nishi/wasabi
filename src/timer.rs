@@ -53,12 +53,13 @@ pub fn base_from_acpi(rsdp: &Rsdp) -> Result<u64> {
 static BASE: AtomicU64 = AtomicU64::new(0);
 static PERIOD_FEMTOSECONDS: AtomicU64 = AtomicU64::new(1);
 
-/// Starts the counter at `base` (the HPET registers) and remembers it.
+/// Starts the HPET counter at `base` and remembers its tick length, so time can
+/// be read from here on. Call this once, at boot.
 ///
 /// # Safety
 ///
 /// `base` must point at the HPET's memory-mapped registers.
-pub unsafe fn init(base: u64) -> Result<()> {
+pub unsafe fn start(base: u64) -> Result<()> {
     let registers = base as *const u8;
     let capability = unsafe { read_volatile(registers.add(CAPABILITY) as *const u64) };
     // The upper half of the capability register is COUNTER_CLK_PERIOD: how long
