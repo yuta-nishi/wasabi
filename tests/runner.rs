@@ -13,6 +13,8 @@ mod executor;
 mod interrupts;
 #[path = "runner/paging.rs"]
 mod paging;
+#[path = "runner/timer.rs"]
+mod timer;
 
 use core::panic::PanicInfo;
 use wasabi::error;
@@ -34,6 +36,12 @@ extern "efiapi" fn efi_main(
     // GDT/IDT (its interrupt handlers would not survive the switch).
     let _memory_map = init_basic_runtime(image_handle, efi_system_table);
     let _exceptions = wasabi::exceptions::init();
+    let rsdp = efi_system_table
+        .acpi_rsdp()
+        .expect("the firmware has no ACPI table");
+    let hpet_base = wasabi::acpi::hpet_base(rsdp).expect("no HPET in ACPI");
+    // SAFETY: the ACPI table points at the HPET's memory-mapped registers.
+    unsafe { wasabi::timer::init(hpet_base) }.expect("HPET init failed");
 
     run_tests(&[
         (
@@ -88,6 +96,10 @@ extern "efiapi" fn efi_main(
         (
             "yielding_lets_another_task_run",
             executor::yielding_lets_another_task_run,
+        ),
+        (
+            "sleep_waits_for_its_deadline",
+            timer::sleep_waits_for_its_deadline,
         ),
     ])
 }
