@@ -7,6 +7,9 @@
 //! The timer is registered once at boot and read through two atomics, so tasks
 //! (and later interrupt handlers) can ask for the time without locking.
 
+use crate::acpi::GenericAddress;
+use crate::acpi::Rsdp;
+use crate::acpi::TableHeader;
 use crate::result::Result;
 use core::future::Future;
 use core::pin::Pin;
@@ -24,6 +27,28 @@ const CONFIGURATION: usize = 0x010;
 const MAIN_COUNTER: usize = 0x0f0;
 /// Bit 0 of the configuration register enables the counter.
 const ENABLE: u64 = 1 << 0;
+
+/// `HPET` (ACPI 6.5, 5.2.25.15): where the timer registers live.
+#[repr(C, packed)]
+struct HpetDescription {
+    _header: TableHeader,
+    _event_timer_block_id: u32,
+    base_address: GenericAddress,
+    _hpet_number: u8,
+    _minimum_tick: u16,
+    _page_protection: u8,
+}
+
+/// The HPET register base the ACPI tables describe.
+pub fn base_from_acpi(rsdp: &Rsdp) -> Result<u64> {
+    let header = rsdp
+        .xsdt()
+        .find(b"HPET")
+        .ok_or("no HPET table in the XSDT")?;
+    // SAFETY: `find` only returns tables whose signature is `HPET`.
+    let table = unsafe { &*(header as *const TableHeader as *const HpetDescription) };
+    table.base_address.address_in_memory_space()
+}
 
 static BASE: AtomicU64 = AtomicU64::new(0);
 static PERIOD_FEMTOSECONDS: AtomicU64 = AtomicU64::new(1);

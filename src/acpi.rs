@@ -105,9 +105,10 @@ impl Xsdt {
     }
 }
 
-/// A memory address as ACPI describes it (ACPI 6.5, 5.2.3.2).
+/// A memory address as ACPI describes it (ACPI 6.5, 5.2.3.2). The address is
+/// only a memory address when the space says so.
 #[repr(C, packed)]
-struct GenericAddress {
+pub struct GenericAddress {
     address_space_id: u8,
     _bit_width: u8,
     _bit_offset: u8,
@@ -116,29 +117,12 @@ struct GenericAddress {
 }
 const _: () = assert!(size_of::<GenericAddress>() == 12);
 
-/// `HPET` (ACPI 6.5, 5.2.25.15): where the timer registers live.
-#[repr(C, packed)]
-struct HpetDescription {
-    header: TableHeader,
-    _event_timer_block_id: u32,
-    base_address: GenericAddress,
-    _hpet_number: u8,
-    _minimum_tick: u16,
-    _page_protection: u8,
-}
-const _: () = assert!(size_of::<HpetDescription>() == 56);
-
-/// The memory-mapped base address of the HPET registers.
-pub fn hpet_base(rsdp: &Rsdp) -> Result<u64> {
-    let header = rsdp
-        .xsdt()
-        .find(b"HPET")
-        .ok_or("no HPET table in the XSDT")?;
-    // SAFETY: `find` only returns tables whose signature is `HPET`.
-    let table = unsafe { &*(header as *const TableHeader as *const HpetDescription) };
-    let address = table.base_address.address_space_id;
-    if address != 0 {
-        return Err("the HPET registers are not in memory space");
+impl GenericAddress {
+    /// The address, if it lives in system memory and can be dereferenced.
+    pub fn address_in_memory_space(&self) -> Result<u64> {
+        if self.address_space_id != 0 {
+            return Err("the ACPI address is not in system memory space");
+        }
+        Ok(self.address)
     }
-    Ok(table.base_address.address)
 }

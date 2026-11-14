@@ -4,7 +4,6 @@
 use core::fmt::Write;
 use core::panic::PanicInfo;
 use core::writeln;
-use wasabi::acpi;
 use wasabi::error;
 use wasabi::exceptions;
 use wasabi::executor::Executor;
@@ -69,7 +68,7 @@ extern "efiapi" fn efi_main(
     let rsdp = efi_system_table
         .acpi_rsdp()
         .expect("the firmware has no ACPI table");
-    let hpet_base = acpi::hpet_base(rsdp).expect("no HPET in ACPI");
+    let hpet_base = timer::base_from_acpi(rsdp).expect("no HPET in ACPI");
     info!("paging: HPET registers at {hpet_base:#018x}");
     // SAFETY: the ACPI table points at the HPET's memory-mapped registers.
     unsafe { timer::init(hpet_base) }.expect("HPET init failed");
