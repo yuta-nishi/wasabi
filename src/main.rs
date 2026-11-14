@@ -4,10 +4,10 @@
 use core::fmt::Write;
 use core::panic::PanicInfo;
 use core::writeln;
+use wasabi::acpi;
 use wasabi::error;
 use wasabi::exceptions;
 use wasabi::executor::Executor;
-use wasabi::executor::yield_now;
 use wasabi::graphics::Bitmap;
 use wasabi::graphics::draw_test_pattern;
 use wasabi::graphics::fill_rect;
@@ -18,6 +18,7 @@ use wasabi::paging;
 use wasabi::println;
 use wasabi::qemu::QemuExitCode;
 use wasabi::qemu::exit_qemu;
+use wasabi::timer;
 use wasabi::uefi::EfiHandle;
 use wasabi::uefi::EfiMemoryType;
 use wasabi::uefi::EfiStatus;
@@ -65,6 +66,14 @@ extern "efiapi" fn efi_main(
     paging::dump_translation(0);
     paging::dump_translation(efi_main as *const () as usize as u64);
 
+    let rsdp = efi_system_table
+        .acpi_rsdp()
+        .expect("the firmware has no ACPI table");
+    let hpet_base = acpi::hpet_base(rsdp).expect("no HPET in ACPI");
+    info!("paging: HPET registers at {hpet_base:#018x}");
+    // SAFETY: the ACPI table points at the HPET's memory-mapped registers.
+    unsafe { timer::init(hpet_base) }.expect("HPET init failed");
+
     let tables = init_paging(&memory_map);
     tables.switch();
     info!("paging: switched to our own tables");
@@ -72,15 +81,21 @@ extern "efiapi" fn efi_main(
 
     EXECUTOR.spawn(async {
         for step in 0..3 {
-            info!("task a: step {step}");
-            yield_now().await;
+            info!(
+                "task a: step {step} at {} ms",
+                timer::nanoseconds() / 1_000_000
+            );
+            timer::sleep(50_000).await;
         }
         info!("task a: done");
     });
     EXECUTOR.spawn(async {
         for step in 0..3 {
-            info!("task b: step {step}");
-            yield_now().await;
+            info!(
+                "task b: step {step} at {} ms",
+                timer::nanoseconds() / 1_000_000
+            );
+            timer::sleep(30_000).await;
         }
         info!("task b: done");
     });

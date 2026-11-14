@@ -1,3 +1,4 @@
+use crate::acpi::Rsdp;
 use crate::graphics::Bitmap;
 use crate::graphics::draw_font_fg;
 use crate::result::Result;
@@ -21,6 +22,13 @@ struct EfiGuid {
     pub data2: u16,
     pub data3: [u8; 8],
 }
+
+const EFI_ACPI_TABLE_GUID: EfiGuid = EfiGuid {
+    data0: 0x8868_e871,
+    data1: 0xe4f1,
+    data2: 0x11d3,
+    data3: [0xbc, 0x22, 0x00, 0x80, 0xc7, 0x3c, 0x88, 0x81],
+};
 
 const EFI_LOADED_IMAGE_PROTOCOL_GUID: EfiGuid = EfiGuid {
     data0: 0x5b1b31a1,
@@ -247,15 +255,44 @@ impl EfiBootServicesTable {
     }
 }
 
+/// One entry of the system table's configuration table (UEFI spec 4.6).
+#[repr(C)]
+struct EfiConfigurationTable {
+    vendor_guid: EfiGuid,
+    vendor_table: *const u8,
+}
+
 #[repr(C)]
 pub struct EfiSystemTable {
     _reserved0: [u64; 12],
     boot_services: &'static EfiBootServicesTable,
+    number_of_table_entries: usize,
+    configuration_table: *const EfiConfigurationTable,
 }
 const _: () = assert!(offset_of!(EfiSystemTable, boot_services) == 96);
+const _: () = assert!(offset_of!(EfiSystemTable, number_of_table_entries) == 104);
+const _: () = assert!(offset_of!(EfiSystemTable, configuration_table) == 112);
+
 impl EfiSystemTable {
     pub fn boot_services(&self) -> &EfiBootServicesTable {
         self.boot_services
+    }
+
+    /// The ACPI root pointer the firmware publishes in its configuration table.
+    pub fn acpi_rsdp(&self) -> Option<&'static Rsdp> {
+        for index in 0..self.number_of_table_entries {
+            // SAFETY: the configuration table has `number_of_table_entries`
+            // entries, and they live as long as the firmware's tables do.
+            let entry = unsafe { &*self.configuration_table.add(index) };
+            if entry.vendor_guid == EFI_ACPI_TABLE_GUID {
+                // SAFETY: the ACPI GUID means the vendor table is the RSDP.
+                let rsdp = unsafe { &*(entry.vendor_table as *const Rsdp) };
+                if rsdp.is_valid() {
+                    return Some(rsdp);
+                }
+            }
+        }
+        None
     }
 }
 
