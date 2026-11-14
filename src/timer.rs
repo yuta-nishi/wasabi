@@ -51,35 +51,41 @@ pub fn base_from_acpi(rsdp: &Rsdp) -> Result<u64> {
 }
 
 static BASE: AtomicU64 = AtomicU64::new(0);
-static PERIOD_FEMTOSECONDS: AtomicU64 = AtomicU64::new(1);
 
-/// Starts the HPET counter at `base` and remembers its tick length, so time can
-/// be read from here on. Call this once, at boot.
+/// How long one tick lasts, as the HPET reports it. The counter is free-running
+/// and started by the firmware, so nothing here defines its zero point.
 ///
 /// # Safety
 ///
 /// `base` must point at the HPET's memory-mapped registers.
-pub unsafe fn start(base: u64) -> Result<()> {
-    let registers = base as *const u8;
-    let capability = unsafe { read_volatile(registers.add(CAPABILITY) as *const u64) };
-    // The upper half of the capability register is COUNTER_CLK_PERIOD: how long
-    // one tick lasts, in femtoseconds. The lower half only describes the device
-    // (revision, comparators, vendor id), so it is not used here.
-    let period = capability >> 32;
-    if period == 0 {
+unsafe fn period_femtoseconds(base: u64) -> u64 {
+    // The upper half of the capability register is COUNTER_CLK_PERIOD; the lower
+    // half only describes the device (revision, comparators, vendor id).
+    let capability =
+        unsafe { read_volatile((base as *const u8).add(CAPABILITY) as *const u64) };
+    capability >> 32
+}
+
+/// Checks that the HPET is usable at `base`, makes sure its counter is running,
+/// and remembers where it is. Call this once, at boot.
+///
+/// # Safety
+///
+/// `base` must point at the HPET's memory-mapped registers.
+pub unsafe fn init(base: u64) -> Result<()> {
+    if unsafe { period_femtoseconds(base) } == 0 {
         return Err("the HPET reports a zero period");
     }
     unsafe {
-        let configuration = registers.add(CONFIGURATION) as *mut u64;
+        let configuration = (base as *const u8).add(CONFIGURATION) as *mut u64;
         let value = read_volatile(configuration);
         core::ptr::write_volatile(configuration, value | ENABLE);
     }
     BASE.store(base, Ordering::Release);
-    PERIOD_FEMTOSECONDS.store(period, Ordering::Release);
     Ok(())
 }
 
-/// Ticks of the main counter since the HPET started.
+/// Ticks of the free-running main counter.
 pub fn ticks() -> u64 {
     let base = BASE.load(Ordering::Acquire);
     if base == 0 {
@@ -89,9 +95,14 @@ pub fn ticks() -> u64 {
     unsafe { read_volatile((base as *const u8).add(MAIN_COUNTER) as *const u64) }
 }
 
-/// Nanoseconds since the HPET started.
+/// Nanoseconds, counted from whenever the HPET's counter started.
 pub fn nanoseconds() -> u64 {
-    let period = PERIOD_FEMTOSECONDS.load(Ordering::Acquire);
+    let base = BASE.load(Ordering::Acquire);
+    if base == 0 {
+        return 0;
+    }
+    // SAFETY: `init` stored this address and never changes it again.
+    let period = unsafe { period_femtoseconds(base) };
     let femtoseconds = u128::from(ticks()) * u128::from(period);
     (femtoseconds / 1_000_000) as u64
 }

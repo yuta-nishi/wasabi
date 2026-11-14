@@ -41,7 +41,7 @@ extern "efiapi" fn efi_main(
         .expect("the firmware has no ACPI table");
     let hpet_base = wasabi::timer::base_from_acpi(rsdp).expect("no HPET in ACPI");
     // SAFETY: the ACPI table points at the HPET's memory-mapped registers.
-    unsafe { wasabi::timer::start(hpet_base) }.expect("starting the HPET failed");
+    unsafe { wasabi::timer::init(hpet_base) }.expect("initializing the HPET failed");
 
     run_tests(&[
         (

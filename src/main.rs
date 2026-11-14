@@ -71,7 +71,7 @@ extern "efiapi" fn efi_main(
     let hpet_base = timer::base_from_acpi(rsdp).expect("no HPET in ACPI");
     info!("paging: HPET registers at {hpet_base:#018x}");
     // SAFETY: the ACPI table points at the HPET's memory-mapped registers.
-    unsafe { timer::start(hpet_base) }.expect("starting the HPET failed");
+    unsafe { timer::init(hpet_base) }.expect("initializing the HPET failed");
 
     let tables = init_paging(&memory_map);
     tables.switch();
