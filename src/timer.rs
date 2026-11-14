@@ -85,22 +85,24 @@ pub unsafe fn init(base: u64) -> Result<()> {
     Ok(())
 }
 
+/// The HPET register base. Panics if `init` has not run yet: using the timer
+/// before that is a boot-order bug, not a runtime condition to paper over.
+fn base() -> u64 {
+    let base = BASE.load(Ordering::Acquire);
+    assert!(base != 0, "timer::init has not run yet");
+    base
+}
+
 /// Ticks of the free-running main counter.
 pub fn ticks() -> u64 {
-    let base = BASE.load(Ordering::Acquire);
-    if base == 0 {
-        return 0;
-    }
+    let base = base();
     // SAFETY: `init` stored this address and never changes it again.
     unsafe { read_volatile((base as *const u8).add(MAIN_COUNTER) as *const u64) }
 }
 
 /// Nanoseconds, counted from whenever the HPET's counter started.
 pub fn nanoseconds() -> u64 {
-    let base = BASE.load(Ordering::Acquire);
-    if base == 0 {
-        return 0;
-    }
+    let base = base();
     // SAFETY: `init` stored this address and never changes it again.
     let period = unsafe { period_femtoseconds(base) };
     let femtoseconds = u128::from(ticks()) * u128::from(period);
