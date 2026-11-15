@@ -11,6 +11,7 @@ pub mod gdt;
 pub mod graphics;
 pub mod idt;
 pub mod init;
+pub mod interrupts;
 pub mod mutex;
 pub mod paging;
 pub mod qemu;

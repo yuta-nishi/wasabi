@@ -36,6 +36,8 @@ const INTERRUPT_GATE: u8 = 0x8e;
 /// IST index (1-based) of the stack the CPU switches to for every exception.
 const INTERRUPT_STACK_INDEX: u8 = 1;
 
+/// CPU exceptions (0..31) plus the timer interrupt (32).
+const VECTOR_COUNT: usize = 33;
 const EXCEPTION_COUNT: usize = 32;
 
 const EXCEPTION_NAMES: [&str; EXCEPTION_COUNT] = [
@@ -162,6 +164,36 @@ global_asm!(
         lock inc qword ptr [rip + {breakpoints}]
         iretq
 
+    // The timer interrupt returns to whatever it interrupted, so it saves the
+    // registers it may clobber and acknowledges the PIC on the way out.
+    .globl wasabi_isr_32
+    wasabi_isr_32:
+        push rbp
+        push rax
+        push rcx
+        push rdx
+        push rsi
+        push rdi
+        push r8
+        push r9
+        push r10
+        push r11
+        mov rbp, rsp
+        and rsp, -16
+        call {timer_tick}
+        mov rsp, rbp
+        pop r11
+        pop r10
+        pop r9
+        pop r8
+        pop rdi
+        pop rsi
+        pop rdx
+        pop rcx
+        pop rax
+        pop rbp
+        iretq
+
     .globl wasabi_isr_common
     wasabi_isr_common:
         and rsp, -16
@@ -204,17 +236,19 @@ global_asm!(
         .quad wasabi_isr_29
         .quad wasabi_isr_30
         .quad wasabi_isr_31
+        .quad wasabi_isr_32
     "#,
     vector = sym LAST_VECTOR,
     error = sym LAST_ERROR,
     rip = sym LAST_RIP,
     breakpoints = sym BREAKPOINTS_HANDLED,
     fatal = sym fatal_exception,
+    timer_tick = sym timer_tick,
 );
 
 unsafe extern "C" {
     #[link_name = "wasabi_isr_table"]
-    static ISR_TABLE: [unsafe extern "C" fn(); EXCEPTION_COUNT];
+    static ISR_TABLE: [unsafe extern "C" fn(); VECTOR_COUNT];
 }
 
 impl IdtDescriptor {
@@ -272,6 +306,12 @@ impl Idt {
             asm!("lidt [{}]", in(reg) &pointer, options(nostack, preserves_flags));
         }
     }
+}
+
+/// Counts a timer interrupt and acknowledges it.
+extern "C" fn timer_tick() {
+    crate::interrupts::TICKS.fetch_add(1, Ordering::Relaxed);
+    crate::interrupts::send_eoi();
 }
 
 /// Reports an unexpected exception and stops the run. It is called from
