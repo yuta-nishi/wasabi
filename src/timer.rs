@@ -118,9 +118,9 @@ pub fn nanoseconds() -> u64 {
     hpet.nanoseconds()
 }
 
-/// A future that stays pending until its deadline, waking itself to be polled
-/// again. Nothing here is asynchronous yet: the executor spins until the time
-/// has passed, which is the limitation the next commit in the book fixes.
+/// A future that stays pending until its deadline. It does not wake itself: the
+/// timer interrupt marks every task woken once a millisecond, so the executor
+/// can sleep in `hlt` in between.
 pub struct Sleep {
     deadline_nanoseconds: u64,
 }
@@ -132,7 +132,7 @@ impl Future for Sleep {
         if nanoseconds() >= self.deadline_nanoseconds {
             Poll::Ready(())
         } else {
-            context.waker().wake_by_ref();
+            let _ = context;
             Poll::Pending
         }
     }

@@ -8,7 +8,6 @@ use core::writeln;
 use wasabi::error;
 use wasabi::exceptions;
 use wasabi::executor::Executor;
-use wasabi::executor::yield_now;
 use wasabi::graphics::Bitmap;
 use wasabi::graphics::draw_test_pattern;
 use wasabi::graphics::fill_rect;
@@ -104,7 +103,7 @@ extern "efiapi" fn efi_main(
                 info!("timer ticks: {now}");
                 last = now;
             }
-            yield_now().await;
+            timer::sleep(Duration::from_millis(100)).await;
         }
     });
     EXECUTOR.spawn(async {
