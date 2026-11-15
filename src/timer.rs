@@ -10,12 +10,11 @@
 use crate::acpi::GenericAddress;
 use crate::acpi::Rsdp;
 use crate::acpi::TableHeader;
+use crate::mutex::Mutex;
 use crate::result::Result;
 use core::future::Future;
 use core::pin::Pin;
 use core::ptr::read_volatile;
-use core::sync::atomic::AtomicU64;
-use core::sync::atomic::Ordering;
 use core::task::Context;
 use core::task::Poll;
 use core::time::Duration;
@@ -51,20 +50,38 @@ pub fn base_from_acpi(rsdp: &Rsdp) -> Result<u64> {
     table.base_address.address_in_memory_space()
 }
 
-static BASE: AtomicU64 = AtomicU64::new(0);
+static HPET: Mutex<Option<Hpet>> = Mutex::new(None);
 
-/// How long one tick lasts, as the HPET reports it. The counter is free-running
-/// and started by the firmware, so nothing here defines its zero point.
-///
-/// # Safety
-///
-/// `base` must point at the HPET's memory-mapped registers.
-unsafe fn period_femtoseconds(base: u64) -> u64 {
-    // The upper half of the capability register is COUNTER_CLK_PERIOD; the lower
-    // half only describes the device (revision, comparators, vendor id).
-    let capability =
-        unsafe { read_volatile((base as *const u8).add(CAPABILITY) as *const u64) };
-    capability >> 32
+/// The HPET registers, once [`init`] has found them.
+struct Hpet {
+    base: u64,
+}
+
+impl Hpet {
+    /// How long one tick lasts, as the HPET reports it. The counter itself is
+    /// free-running and started by the firmware, so nothing here defines its
+    /// zero point.
+    fn period_femtoseconds(&self) -> u64 {
+        // The upper half of the capability register is COUNTER_CLK_PERIOD; the
+        // lower half only describes the device (revision, comparators, vendor).
+        let capability = unsafe {
+            read_volatile((self.base as *const u8).add(CAPABILITY) as *const u64)
+        };
+        capability >> 32
+    }
+
+    /// Ticks of the free-running main counter.
+    fn ticks(&self) -> u64 {
+        // SAFETY: `self.base` points at the HPET's memory-mapped registers.
+        unsafe { read_volatile((self.base as *const u8).add(MAIN_COUNTER) as *const u64) }
+    }
+
+    /// Nanoseconds, counted from whenever the counter started.
+    fn nanoseconds(&self) -> u64 {
+        let femtoseconds =
+            u128::from(self.ticks()) * u128::from(self.period_femtoseconds());
+        (femtoseconds / 1_000_000) as u64
+    }
 }
 
 /// Checks that the HPET is usable at `base`, makes sure its counter is running,
@@ -74,7 +91,8 @@ unsafe fn period_femtoseconds(base: u64) -> u64 {
 ///
 /// `base` must point at the HPET's memory-mapped registers.
 pub unsafe fn init(base: u64) -> Result<()> {
-    if unsafe { period_femtoseconds(base) } == 0 {
+    let hpet = Hpet { base };
+    if hpet.period_femtoseconds() == 0 {
         return Err("the HPET reports a zero period");
     }
     unsafe {
@@ -82,32 +100,22 @@ pub unsafe fn init(base: u64) -> Result<()> {
         let value = read_volatile(configuration);
         core::ptr::write_volatile(configuration, value | ENABLE);
     }
-    BASE.store(base, Ordering::Release);
+    *HPET.lock() = Some(hpet);
     Ok(())
-}
-
-/// The HPET register base. Panics if `init` has not run yet: using the timer
-/// before that is a boot-order bug, not a runtime condition to paper over.
-fn base() -> u64 {
-    let base = BASE.load(Ordering::Acquire);
-    assert!(base != 0, "timer::init has not run yet");
-    base
 }
 
 /// Ticks of the free-running main counter.
 pub fn ticks() -> u64 {
-    let base = base();
-    // SAFETY: `init` stored this address and never changes it again.
-    unsafe { read_volatile((base as *const u8).add(MAIN_COUNTER) as *const u64) }
+    let guard = HPET.lock();
+    let hpet = guard.as_ref().expect("timer::init has not run yet");
+    hpet.ticks()
 }
 
 /// Nanoseconds, counted from whenever the HPET's counter started.
 pub fn nanoseconds() -> u64 {
-    let base = base();
-    // SAFETY: `init` stored this address and never changes it again.
-    let period = unsafe { period_femtoseconds(base) };
-    let femtoseconds = u128::from(ticks()) * u128::from(period);
-    (femtoseconds / 1_000_000) as u64
+    let guard = HPET.lock();
+    let hpet = guard.as_ref().expect("timer::init has not run yet");
+    hpet.nanoseconds()
 }
 
 /// A future that stays pending until its deadline, waking itself to be polled
