@@ -18,6 +18,7 @@ use core::sync::atomic::AtomicU64;
 use core::sync::atomic::Ordering;
 use core::task::Context;
 use core::task::Poll;
+use core::time::Duration;
 
 /// Offset of the capability and ID register.
 const CAPABILITY: usize = 0x000;
@@ -129,9 +130,10 @@ impl Future for Sleep {
     }
 }
 
-/// Suspends the calling task for at least `microseconds`.
-pub fn sleep(microseconds: u64) -> Sleep {
+/// Suspends the calling task for at least `duration`.
+pub fn sleep(duration: Duration) -> Sleep {
+    let delay = u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX);
     Sleep {
-        deadline_nanoseconds: nanoseconds() + microseconds * 1_000,
+        deadline_nanoseconds: nanoseconds().saturating_add(delay),
     }
 }

@@ -3,6 +3,7 @@
 
 use core::fmt::Write;
 use core::panic::PanicInfo;
+use core::time::Duration;
 use core::writeln;
 use wasabi::error;
 use wasabi::exceptions;
@@ -84,7 +85,7 @@ extern "efiapi" fn efi_main(
                 "task a: step {step} at {} ms",
                 timer::nanoseconds() / 1_000_000
             );
-            timer::sleep(50_000).await;
+            timer::sleep(Duration::from_millis(50)).await;
         }
         info!("task a: done");
     });
@@ -94,7 +95,7 @@ extern "efiapi" fn efi_main(
                 "task b: step {step} at {} ms",
                 timer::nanoseconds() / 1_000_000
             );
-            timer::sleep(30_000).await;
+            timer::sleep(Duration::from_millis(30)).await;
         }
         info!("task b: done");
     });
