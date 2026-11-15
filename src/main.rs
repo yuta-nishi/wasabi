@@ -8,12 +8,14 @@ use core::writeln;
 use wasabi::error;
 use wasabi::exceptions;
 use wasabi::executor::Executor;
+use wasabi::executor::yield_now;
 use wasabi::graphics::Bitmap;
 use wasabi::graphics::draw_test_pattern;
 use wasabi::graphics::fill_rect;
 use wasabi::info;
 use wasabi::init::init_basic_runtime;
 use wasabi::init::init_paging;
+use wasabi::interrupts;
 use wasabi::paging;
 use wasabi::println;
 use wasabi::qemu::QemuExitCode;
@@ -88,6 +90,22 @@ extern "efiapi" fn efi_main(
             timer::sleep(Duration::from_millis(50)).await;
         }
         info!("task a: done");
+    });
+    interrupts::remap_pic();
+    interrupts::start_pit(1_000);
+    info!("interrupts: PIT firing at 1 kHz");
+    unsafe { core::arch::asm!("sti") };
+
+    EXECUTOR.spawn(async {
+        let mut last = 0;
+        loop {
+            let now = interrupts::TICKS.load(core::sync::atomic::Ordering::Relaxed);
+            if now >= last + 1_000 {
+                info!("timer ticks: {now}");
+                last = now;
+            }
+            yield_now().await;
+        }
     });
     EXECUTOR.spawn(async {
         for step in 0..3 {
