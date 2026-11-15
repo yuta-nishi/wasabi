@@ -11,6 +11,8 @@ mod debug;
 mod executor;
 #[path = "runner/interrupts.rs"]
 mod interrupts;
+#[path = "runner/mutex.rs"]
+mod mutex;
 #[path = "runner/paging.rs"]
 mod paging;
 #[path = "runner/timer.rs"]
@@ -101,6 +103,11 @@ extern "efiapi" fn efi_main(
             "sleep_waits_for_its_deadline",
             timer::sleep_waits_for_its_deadline,
         ),
+        (
+            "mutex_guards_can_be_taken_again_after_dropping",
+            mutex::mutex_guards_can_be_taken_again_after_dropping,
+        ),
+        ("mutex_is_shareable", mutex::mutex_is_shareable),
     ])
 }
 
