@@ -1,4 +1,7 @@
-//! Serial port (COM1) output for debugging.
+//! The serial port (COM1), one of the two sinks `print!` writes to.
+//!
+//! `src/console.rs` owns the `print!` family and forwards each chunk here and to
+//! the framebuffer; this module only knows how to put bytes on COM1.
 //!
 //! `scripts/launch_qemu.sh` starts QEMU with `-serial stdio`, so everything
 //! written here shows up in the terminal that runs `cargo test` or `cargo run`.
