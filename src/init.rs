@@ -12,7 +12,6 @@ use crate::uefi::EfiHandle;
 use crate::uefi::EfiMemoryType;
 use crate::uefi::EfiSystemTable;
 use crate::uefi::MemoryMapHolder;
-use crate::uefi::VramBufferInfo;
 use crate::uefi::exit_from_efi_boot_services;
 use crate::uefi::init_vram;
 
@@ -54,11 +53,13 @@ pub fn init_paging(memory_map: &MemoryMapHolder) -> PageTables {
     tables
 }
 
-/// Takes over the firmware's framebuffer, clears it and paints the test pattern.
-pub fn init_screen(efi_system_table: &EfiSystemTable) -> Result<VramBufferInfo> {
+/// Takes over the firmware's framebuffer, clears it, paints the test pattern and
+/// makes it the screen `print!` writes to.
+pub fn init_screen(efi_system_table: &EfiSystemTable) -> Result<()> {
     let mut vram = init_vram(efi_system_table)?;
     let (width, height) = (vram.width(), vram.height());
     fill_rect(&mut vram, 0x000000, 0, 0, width, height)?;
     draw_test_pattern(&mut vram);
-    Ok(vram)
+    crate::console::install_screen(vram);
+    Ok(())
 }

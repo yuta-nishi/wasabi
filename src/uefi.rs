@@ -422,6 +422,11 @@ impl<'a, B: Bitmap> BitmapTextWriter<'a, B> {
         }
     }
 }
+// SAFETY: the writer only holds a `&mut` to the framebuffer, which is a fixed
+// address the CPU writes through; moving it between contexts on this single-CPU
+// OS moves that borrow and nothing else.
+unsafe impl<B: Bitmap> Send for BitmapTextWriter<'_, B> {}
+
 impl<B: Bitmap> fmt::Write for BitmapTextWriter<'_, B> {
     fn write_str(&mut self, s: &str) -> fmt::Result {
         for c in s.chars() {

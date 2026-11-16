@@ -1,10 +1,8 @@
 #![no_std]
 #![no_main]
 
-use core::fmt::Write;
 use core::panic::PanicInfo;
 use core::time::Duration;
-use core::writeln;
 use wasabi::error;
 use wasabi::exceptions;
 use wasabi::executor::Executor;
@@ -18,7 +16,6 @@ use wasabi::println;
 use wasabi::qemu::QemuExitCode;
 use wasabi::qemu::exit_qemu;
 use wasabi::timer;
-use wasabi::uefi::BitmapTextWriter;
 use wasabi::uefi::EfiHandle;
 use wasabi::uefi::EfiMemoryType;
 use wasabi::uefi::EfiStatus;
@@ -30,8 +27,7 @@ extern "efiapi" fn efi_main(
     image_handle: EfiHandle,
     efi_system_table: &EfiSystemTable,
 ) -> EfiStatus {
-    let mut vram = init_screen(efi_system_table).expect("init_screen failed");
-    let mut w = BitmapTextWriter::new(&mut vram);
+    init_screen(efi_system_table).expect("init_screen failed");
     let loaded_image = locate_loaded_image_protocol(image_handle, efi_system_table)
         .expect("locate_loaded_image_protocol failed");
     info!(
@@ -45,15 +41,10 @@ extern "efiapi" fn efi_main(
             continue;
         }
         total_memory_pages += e.number_of_pages();
-        writeln!(w, "{e:?}").unwrap();
+        println!("{e:?}");
     }
     let total_memory_size_mib = total_memory_pages * 4096 / 1024 / 1024;
-    writeln!(
-        w,
-        "Total: {total_memory_pages} pages = {total_memory_size_mib} MiB"
-    )
-    .unwrap();
-    writeln!(w, "Hello, Non-UEFI world!").unwrap();
+    println!("Total: {total_memory_pages} pages = {total_memory_size_mib} MiB");
     println!("Hello, Non-UEFI world!");
     let _exceptions = exceptions::init();
     paging::dump_root();
