@@ -1,8 +1,8 @@
-//! The 8259 PIC and the 8254 PIT: periodic timer interrupts.
+//! Interrupt plumbing: the PIC/PIT setup and the entry stubs.
 //!
-//! By default the PIC delivers IRQ0..7 as vectors 8..15, which collide with CPU
-//! exceptions, so it is remapped to 32..47 first. IRQ0 is then driven by the PIT
-//! at a fixed frequency, and the handler acknowledges it through the PIC's EOI.
+//! The stubs themselves live in `stubs`; this file programs the hardware.
+
+pub mod stubs;
 
 use crate::x86::write_io_port_u8;
 use core::sync::atomic::AtomicU64;
