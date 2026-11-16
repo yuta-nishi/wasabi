@@ -4,9 +4,9 @@
 //! Formatting happens once; the resulting string chunks are forwarded to both
 //! sinks, so the two outputs never disagree.
 
-use crate::graphics::draw_font_fg;
 use crate::mutex::Mutex;
 use crate::serial::Serial;
+use crate::uefi::BitmapTextWriter;
 use crate::uefi::VramBufferInfo;
 use core::fmt;
 use core::fmt::Write;
@@ -40,21 +40,10 @@ fn screen_write(s: &str) {
     let Some(screen) = screen.as_mut() else {
         return;
     };
-    for c in s.chars() {
-        if c == '\n' {
-            screen.cursor_y += 16;
-            screen.cursor_x = 0;
-            continue;
-        }
-        draw_font_fg(
-            &mut screen.buffer,
-            screen.cursor_x,
-            screen.cursor_y,
-            0xffffff,
-            c,
-        );
-        screen.cursor_x += 8;
-    }
+    let (cursor_x, cursor_y) = (screen.cursor_x, screen.cursor_y);
+    let mut writer = BitmapTextWriter::resume_at(&mut screen.buffer, cursor_x, cursor_y);
+    let _ = writer.write_str(s);
+    (screen.cursor_x, screen.cursor_y) = writer.cursor();
 }
 
 /// Forwards every chunk to the serial port and, if present, the screen.

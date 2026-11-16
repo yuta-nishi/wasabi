@@ -415,11 +415,21 @@ pub struct BitmapTextWriter<'a, B: Bitmap> {
 }
 impl<'a, B: Bitmap> BitmapTextWriter<'a, B> {
     pub fn new(bitmap: &'a mut B) -> Self {
+        Self::resume_at(bitmap, 0, 0)
+    }
+
+    /// Continues writing at a cursor saved by [`Self::cursor`].
+    pub fn resume_at(bitmap: &'a mut B, cursor_x: i64, cursor_y: i64) -> Self {
         Self {
             bitmap,
-            cursor_x: 0,
-            cursor_y: 0,
+            cursor_x,
+            cursor_y,
         }
+    }
+
+    /// Where the next character goes, to be handed back to [`Self::resume_at`].
+    pub fn cursor(&self) -> (i64, i64) {
+        (self.cursor_x, self.cursor_y)
     }
 }
 // SAFETY: the writer only holds a `&mut` to the framebuffer, which is a fixed
