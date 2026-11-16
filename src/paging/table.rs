@@ -1,26 +1,14 @@
-//! Walking the page tables.
-//!
-//! x86_64 uses four levels of 512-entry tables — PML4, PDPT, PD and PT — and
-//! each entry points at the next level until the last one names a 4 KiB frame.
-//! A PDPT entry (1 GiB) or a PD entry (2 MiB) can also end the walk early as a
-//! huge page.
-//!
-//! `translate_in` only reads memory and reports what it found, so the walk can
-//! be tested with hand-made tables; `dump_root` and `dump_translation` print the
-//! results for the tables `CR3` currently points at. [`PageTables`] builds a
-//! fresh tree and can make it the active one.
+//! The page table tree: entries, levels, the walk, and building our own.
 
-use crate::info;
 use crate::x86::read_cr3;
 use crate::x86::write_cr3;
 use alloc::boxed::Box;
 use alloc::vec::Vec;
-use core::fmt;
 use core::pin::Pin;
 
 /// Bits 12..51 of an entry hold the physical address of the next level.
-const ADDRESS_MASK: u64 = 0x000f_ffff_ffff_f000;
-const ENTRIES: usize = 512;
+pub(super) const ADDRESS_MASK: u64 = 0x000f_ffff_ffff_f000;
+pub(super) const ENTRIES: usize = 512;
 
 /// Size of one page, and therefore of one table.
 pub const PAGE_SIZE: u64 = 4096;
@@ -265,7 +253,7 @@ impl PageTables {
     }
 }
 
-fn root() -> &'static [Entry] {
+pub(super) fn root() -> &'static [Entry] {
     let address = (read_cr3() & ADDRESS_MASK) as *const Entry;
     // SAFETY: CR3 points at the PML4 the CPU is currently using.
     unsafe { core::slice::from_raw_parts(address, ENTRIES) }
@@ -277,88 +265,3 @@ fn next(entry: Entry) -> &'static [Entry] {
     unsafe { core::slice::from_raw_parts(address, ENTRIES) }
 }
 
-/// The flag bits of an entry in words, e.g. `present, writable`.
-struct Flags(Entry);
-
-impl fmt::Display for Flags {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        let names = [
-            (1, "present"),
-            (2, "writable"),
-            (4, "user"),
-            (1 << 7, "huge"),
-            (1 << 63, "no-execute"),
-        ];
-        let mut first = true;
-        for (bit, name) in names {
-            if self.0.raw() & bit != 0 {
-                if !first {
-                    f.write_str(", ")?;
-                }
-                first = false;
-                f.write_str(name)?;
-            }
-        }
-        Ok(())
-    }
-}
-
-fn print_step(step: &Step) {
-    let (level, index, start, end) =
-        (step.level.name(), step.index, step.start, step.end);
-    if !step.entry.present() {
-        info!("  {level}[{index:03}] {start:#018x}..{end:#018x} -> not present");
-    } else if step.entry.huge() {
-        info!(
-            "  {level}[{index:03}] {start:#018x}..{end:#018x} -> huge page ({})",
-            Flags(step.entry)
-        );
-    } else {
-        info!(
-            "  {level}[{index:03}] {start:#018x}..{end:#018x} -> next table {:#x} ({})",
-            step.entry.address(),
-            Flags(step.entry)
-        );
-    }
-}
-
-/// Prints the present entries of the root (PML4) table.
-pub fn dump_root() {
-    info!(
-        "paging: cr3 = {:#018x} (the active PML4)",
-        read_cr3() & ADDRESS_MASK
-    );
-    let shift = Level::Pml4.shift();
-    for (index, entry) in root().iter().enumerate() {
-        if entry.present() {
-            let start = (index as u64) << shift;
-            print_step(&Step {
-                level: Level::Pml4,
-                index,
-                start,
-                end: start + (1 << shift),
-                entry: *entry,
-            });
-        }
-    }
-}
-
-/// Prints the walk for `address` and where it ends up.
-pub fn dump_translation(address: u64) {
-    info!("paging: {address:#018x}");
-    let (steps, physical) = match translate(address) {
-        Translation::NotMapped(steps) => {
-            for step in &steps {
-                print_step(step);
-            }
-            info!("  -> not mapped");
-            return;
-        }
-        Translation::Huge(steps, physical) => (steps, physical),
-        Translation::Page(steps, physical) => (steps, physical),
-    };
-    for step in &steps {
-        print_step(step);
-    }
-    info!("  -> physical {physical:#018x}");
-}
