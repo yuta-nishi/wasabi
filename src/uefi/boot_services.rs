@@ -1,27 +1,15 @@
+//! The boot services table, the system table, and the protocols we borrow.
+
+use super::ffi::EfiGuid;
+use super::ffi::EfiHandle;
+use super::ffi::EfiStatus;
+use super::ffi::Out;
+use super::memory_map::MemoryMapHolder;
 use crate::acpi::Rsdp;
-use crate::graphics::Bitmap;
-use crate::graphics::draw_font_fg;
-use crate::result::Result;
 use core::ffi::c_void;
-use core::fmt;
 use core::mem::offset_of;
-use core::mem::size_of;
 use core::ptr::NonNull;
 use core::ptr::null_mut;
-
-pub type EfiHandle = u64;
-
-/// A C output parameter: a pointer through which the callee writes a `T`.
-type Out<T> = *mut T;
-
-#[repr(C)]
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-struct EfiGuid {
-    pub data0: u32,
-    pub data1: u16,
-    pub data2: u16,
-    pub data3: [u8; 8],
-}
 
 const EFI_ACPI_TABLE_GUID: EfiGuid = EfiGuid {
     data0: 0x8868_e871,
@@ -36,117 +24,6 @@ const EFI_LOADED_IMAGE_PROTOCOL_GUID: EfiGuid = EfiGuid {
     data2: 0x11d2,
     data3: [0x8e, 0x3f, 0x00, 0xa0, 0xc9, 0x69, 0x72, 0x3b],
 };
-
-const EFI_GRAPHICS_OUTPUT_PROTOCOL_GUID: EfiGuid = EfiGuid {
-    data0: 0x9042a9de,
-    data1: 0x23dc,
-    data2: 0x4a38,
-    data3: [0x96, 0xfb, 0x7a, 0xde, 0xd0, 0x80, 0x51, 0x6a],
-};
-
-#[derive(Debug, PartialEq, Eq, Copy, Clone)]
-#[must_use]
-#[repr(u64)]
-pub enum EfiStatus {
-    Success = 0,
-}
-
-/// The `EFI_MEMORY_TYPE` values that describe what a memory region is for.
-#[repr(i64)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(non_camel_case_types)]
-pub enum EfiMemoryType {
-    RESERVED = 0,
-    LOADER_CODE,
-    LOADER_DATA,
-    BOOT_SERVICES_CODE,
-    BOOT_SERVICES_DATA,
-    RUNTIME_SERVICES_CODE,
-    RUNTIME_SERVICES_DATA,
-    CONVENTIONAL_MEMORY,
-    UNUSABLE_MEMORY,
-    ACPI_RECLAIM_MEMORY,
-    ACPI_MEMORY_NVS,
-    MEMORY_MAPPED_IO,
-    MEMORY_MAPPED_IO_PORT_SPACE,
-    PAL_CODE,
-    PERSISTENT_MEMORY,
-}
-
-/// One entry of the memory map that `GetMemoryMap` returns.
-#[repr(C)]
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct EfiMemoryDescriptor {
-    memory_type: EfiMemoryType,
-    physical_start: u64,
-    virtual_start: u64,
-    number_of_pages: u64,
-    attribute: u64,
-}
-impl EfiMemoryDescriptor {
-    pub fn memory_type(&self) -> EfiMemoryType {
-        self.memory_type
-    }
-    pub fn physical_start(&self) -> u64 {
-        self.physical_start
-    }
-    pub fn number_of_pages(&self) -> u64 {
-        self.number_of_pages
-    }
-}
-
-const MEMORY_MAP_BUFFER_SIZE: usize = 0x8000;
-
-/// The caller-provided buffer plus the metadata `GetMemoryMap` fills in.
-pub struct MemoryMapHolder {
-    memory_map_buffer: [u8; MEMORY_MAP_BUFFER_SIZE],
-    memory_map_size: usize,
-    map_key: usize,
-    descriptor_size: usize,
-    descriptor_version: u32,
-}
-
-impl MemoryMapHolder {
-    pub const fn new() -> MemoryMapHolder {
-        MemoryMapHolder {
-            memory_map_buffer: [0; MEMORY_MAP_BUFFER_SIZE],
-            memory_map_size: MEMORY_MAP_BUFFER_SIZE,
-            map_key: 0,
-            descriptor_size: 0,
-            descriptor_version: 0,
-        }
-    }
-    pub fn iter(&self) -> MemoryMapIterator<'_> {
-        MemoryMapIterator { map: self, ofs: 0 }
-    }
-}
-impl Default for MemoryMapHolder {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-pub struct MemoryMapIterator<'a> {
-    map: &'a MemoryMapHolder,
-    ofs: usize,
-}
-impl<'a> Iterator for MemoryMapIterator<'a> {
-    type Item = &'a EfiMemoryDescriptor;
-    fn next(&mut self) -> Option<&'a EfiMemoryDescriptor> {
-        if self.ofs >= self.map.memory_map_size {
-            None
-        } else {
-            // SAFETY: `ofs` stays inside the buffer because it is advanced by
-            // `descriptor_size` until it reaches `memory_map_size`.
-            let e: &EfiMemoryDescriptor = unsafe {
-                &*(self.map.memory_map_buffer.as_ptr().add(self.ofs)
-                    as *const EfiMemoryDescriptor)
-            };
-            self.ofs += self.map.descriptor_size;
-            Some(e)
-        }
-    }
-}
 
 /// `EFI_BOOT_SERVICES.GetMemoryMap` (UEFI spec, Memory Allocation Services).
 ///
@@ -218,7 +95,7 @@ impl EfiBootServicesTable {
     /// # Safety
     ///
     /// Same contract as [`Self::locate_protocol`].
-    unsafe fn handle_protocol<'a, T>(
+    pub(super) unsafe fn handle_protocol<'a, T>(
         &self,
         handle: EfiHandle,
         protocol: &EfiGuid,
@@ -241,7 +118,10 @@ impl EfiBootServicesTable {
     ///
     /// `'a` is chosen by the caller: they must ensure the located interface stays
     /// valid and is not mutated for `'a`.
-    unsafe fn locate_protocol<'a, T>(&self, protocol: &EfiGuid) -> Option<&'a T> {
+    pub(super) unsafe fn locate_protocol<'a, T>(
+        &self,
+        protocol: &EfiGuid,
+    ) -> Option<&'a T> {
         let mut out: *mut T = null_mut();
         let locate_protocol_fn = self.locate_protocol_fn;
         let status =
@@ -265,7 +145,7 @@ struct EfiConfigurationTable {
 #[repr(C)]
 pub struct EfiSystemTable {
     _reserved0: [u64; 12],
-    boot_services: &'static EfiBootServicesTable,
+    pub(super) boot_services: &'static EfiBootServicesTable,
     number_of_table_entries: usize,
     configuration_table: *const EfiConfigurationTable,
 }
@@ -297,35 +177,6 @@ impl EfiSystemTable {
     }
 }
 
-#[repr(C)]
-#[derive(Debug)]
-struct EfiGraphicsOutputProtocolPixelInfo {
-    version: u32,
-    pub horizontal_resolution: u32,
-    pub vertical_resolution: u32,
-    _padding0: [u32; 5],
-    pub pixels_per_scan_line: u32,
-}
-const _: () = assert!(size_of::<EfiGraphicsOutputProtocolPixelInfo>() == 36);
-
-#[repr(C)]
-#[derive(Debug)]
-struct EfiGraphicsOutputProtocolMode<'a> {
-    pub max_mode: u32,
-    pub mode: u32,
-    pub info: &'a EfiGraphicsOutputProtocolPixelInfo,
-    pub size_of_info: u64,
-    pub frame_buffer_base: usize,
-    pub frame_buffer_size: usize,
-}
-
-#[repr(C)]
-#[derive(Debug)]
-struct EfiGraphicsOutputProtocol<'a> {
-    reserved: [u64; 3],
-    pub mode: &'a EfiGraphicsOutputProtocolMode<'a>,
-}
-
 /// `EFI_LOADED_IMAGE_PROTOCOL` (UEFI spec 9.2).
 #[repr(C)]
 pub struct EfiLoadedImageProtocol {
@@ -349,7 +200,7 @@ pub struct EfiLoadedImageProtocol {
 pub fn locate_loaded_image_protocol<'a>(
     image_handle: EfiHandle,
     efi_system_table: &EfiSystemTable,
-) -> Result<&'a EfiLoadedImageProtocol> {
+) -> crate::result::Result<&'a EfiLoadedImageProtocol> {
     // SAFETY: the protocol is owned by the firmware and outlives this program.
     unsafe {
         efi_system_table
@@ -357,99 +208,6 @@ pub fn locate_loaded_image_protocol<'a>(
             .handle_protocol(image_handle, &EFI_LOADED_IMAGE_PROTOCOL_GUID)
     }
     .ok_or("Failed to locate the loaded image protocol")
-}
-
-fn locate_graphic_protocol<'a>(
-    efi_system_table: &EfiSystemTable,
-) -> Result<&'a EfiGraphicsOutputProtocol<'a>> {
-    // SAFETY: the GOP interface is owned by the firmware and lives for the whole
-    // lifetime of this program, so borrowing it for `'a` is sound.
-    unsafe {
-        efi_system_table
-            .boot_services
-            .locate_protocol(&EFI_GRAPHICS_OUTPUT_PROTOCOL_GUID)
-    }
-    .ok_or("Failed to locate graphics output protocol")
-}
-
-#[derive(Clone, Copy)]
-pub struct VramBufferInfo {
-    buf: *mut u8,
-    width: i64,
-    height: i64,
-    pixels_per_line: i64,
-}
-impl Bitmap for VramBufferInfo {
-    fn bytes_per_pixel(&self) -> i64 {
-        4
-    }
-    fn pixels_per_line(&self) -> i64 {
-        self.pixels_per_line
-    }
-    fn width(&self) -> i64 {
-        self.width
-    }
-    fn height(&self) -> i64 {
-        self.height
-    }
-    fn buf_mut(&mut self) -> *mut u8 {
-        self.buf
-    }
-}
-
-pub fn init_vram(efi_system_table: &EfiSystemTable) -> Result<VramBufferInfo> {
-    let gp = locate_graphic_protocol(efi_system_table)?;
-    Ok(VramBufferInfo {
-        buf: gp.mode.frame_buffer_base as *mut u8,
-        width: gp.mode.info.horizontal_resolution as i64,
-        height: gp.mode.info.vertical_resolution as i64,
-        pixels_per_line: gp.mode.info.pixels_per_scan_line as i64,
-    })
-}
-
-/// Writes text onto any bitmap, one 8x16 cell per character.
-pub struct BitmapTextWriter<'a, B: Bitmap> {
-    bitmap: &'a mut B,
-    cursor_x: i64,
-    cursor_y: i64,
-}
-impl<'a, B: Bitmap> BitmapTextWriter<'a, B> {
-    pub fn new(bitmap: &'a mut B) -> Self {
-        Self::resume_at(bitmap, 0, 0)
-    }
-
-    /// Continues writing at a cursor saved by [`Self::cursor`].
-    pub fn resume_at(bitmap: &'a mut B, cursor_x: i64, cursor_y: i64) -> Self {
-        Self {
-            bitmap,
-            cursor_x,
-            cursor_y,
-        }
-    }
-
-    /// Where the next character goes, to be handed back to [`Self::resume_at`].
-    pub fn cursor(&self) -> (i64, i64) {
-        (self.cursor_x, self.cursor_y)
-    }
-}
-// SAFETY: the writer only holds a `&mut` to the framebuffer, which is a fixed
-// address the CPU writes through; moving it between contexts on this single-CPU
-// OS moves that borrow and nothing else.
-unsafe impl<B: Bitmap> Send for BitmapTextWriter<'_, B> {}
-
-impl<B: Bitmap> fmt::Write for BitmapTextWriter<'_, B> {
-    fn write_str(&mut self, s: &str) -> fmt::Result {
-        for c in s.chars() {
-            if c == '\n' {
-                self.cursor_y += 16;
-                self.cursor_x = 0;
-                continue;
-            }
-            draw_font_fg(self.bitmap, self.cursor_x, self.cursor_y, 0xffffff, c);
-            self.cursor_x += 8;
-        }
-        Ok(())
-    }
 }
 
 /// Hands control over from the firmware to us: after this returns, boot services

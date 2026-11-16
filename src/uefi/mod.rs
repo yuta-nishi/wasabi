@@ -1,0 +1,25 @@
+//! The parts of UEFI this OS uses: memory map, boot services, graphics and text.
+//!
+//! Everything here is a thin, `#[repr(C)]` view of what the firmware hands over.
+//! The modules follow the spec's structure so a field can be checked against it.
+
+mod boot_services;
+mod console;
+mod ffi;
+mod gop;
+mod memory_map;
+
+pub use boot_services::EfiBootServicesTable;
+pub use boot_services::EfiLoadedImageProtocol;
+pub use boot_services::EfiSystemTable;
+pub use boot_services::exit_from_efi_boot_services;
+pub use boot_services::locate_loaded_image_protocol;
+pub use console::BitmapTextWriter;
+pub use ffi::EfiHandle;
+pub use ffi::EfiMemoryType;
+pub use ffi::EfiStatus;
+pub use gop::VramBufferInfo;
+pub use gop::init_vram;
+pub use memory_map::EfiMemoryDescriptor;
+pub use memory_map::MemoryMapHolder;
+pub use memory_map::MemoryMapIterator;
