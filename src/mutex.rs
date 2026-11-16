@@ -4,6 +4,8 @@
 //! first one drops its guard. That is fine while critical sections are short,
 //! and it is the only option before the OS can block a task.
 
+use crate::x86::disable_interrupts;
+use crate::x86::restore_interrupts;
 use core::cell::UnsafeCell;
 use core::hint::spin_loop;
 use core::ops::Deref;
@@ -31,7 +33,12 @@ impl<T> Mutex<T> {
     }
 
     /// Waits until the lock is free and returns a guard that releases it on drop.
+    ///
+    /// Interrupts are disabled while the guard lives: a timer handler that took
+    /// this lock while the interrupted task holds it could never release it, so
+    /// the task would spin forever.
     pub fn lock(&self) -> MutexGuard<'_, T> {
+        let interrupts = disable_interrupts();
         while self
             .locked
             .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
@@ -39,7 +46,10 @@ impl<T> Mutex<T> {
         {
             spin_loop();
         }
-        MutexGuard { mutex: self }
+        MutexGuard {
+            mutex: self,
+            interrupts,
+        }
     }
 }
 
@@ -53,11 +63,14 @@ impl<T> Mutex<T> {
 /// - a reference borrowed out of the guard cannot outlive it, so it cannot
 ///   outlive the lock either.
 ///
-/// Dropping the guard releases the lock.
+/// Dropping the guard releases the lock and re-enables interrupts if they were
+/// enabled when it was taken.
 pub struct MutexGuard<'a, T> {
     /// The mutex being held: `Drop` releases it and `Deref` reaches the value
     /// through it. This reference is what ties the guard's life to the lock.
     mutex: &'a Mutex<T>,
+    /// The interrupt flag to put back when the guard goes away.
+    interrupts: u64,
 }
 
 impl<T> Deref for MutexGuard<'_, T> {
@@ -81,5 +94,7 @@ impl<T> DerefMut for MutexGuard<'_, T> {
 impl<T> Drop for MutexGuard<'_, T> {
     fn drop(&mut self) {
         self.mutex.locked.store(false, Ordering::Release);
+        // SAFETY: `interrupts` came from `disable_interrupts` in `lock`.
+        unsafe { restore_interrupts(self.interrupts) };
     }
 }

@@ -104,13 +104,6 @@ pub unsafe fn init(base: u64) -> Result<()> {
     Ok(())
 }
 
-/// Ticks of the free-running main counter.
-pub fn ticks() -> u64 {
-    let guard = HPET.lock();
-    let hpet = guard.as_ref().expect("timer::init has not run yet");
-    hpet.ticks()
-}
-
 /// Nanoseconds, counted from whenever the HPET's counter started.
 pub fn nanoseconds() -> u64 {
     let guard = HPET.lock();
@@ -118,9 +111,9 @@ pub fn nanoseconds() -> u64 {
     hpet.nanoseconds()
 }
 
-/// A future that stays pending until its deadline, waking itself to be polled
-/// again. Nothing here is asynchronous yet: the executor spins until the time
-/// has passed, which is the limitation the next commit in the book fixes.
+/// A future that stays pending until its deadline. It does not wake itself: the
+/// timer interrupt marks every task woken once a millisecond, so the executor
+/// can sleep in `hlt` in between.
 pub struct Sleep {
     deadline_nanoseconds: u64,
 }
@@ -132,7 +125,7 @@ impl Future for Sleep {
         if nanoseconds() >= self.deadline_nanoseconds {
             Poll::Ready(())
         } else {
-            context.waker().wake_by_ref();
+            let _ = context;
             Poll::Pending
         }
     }

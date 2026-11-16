@@ -46,3 +46,20 @@ pub struct DescriptorTablePointer {
     pub base: u64,
 }
 const _: () = assert!(core::mem::size_of::<DescriptorTablePointer>() == 10);
+
+/// Disables interrupts and returns the previous flag word, for
+/// [`restore_interrupts`].
+pub fn disable_interrupts() -> u64 {
+    let flags: u64;
+    unsafe { asm!("pushfq", "pop {}", "cli", out(reg) flags, options(nomem)) }
+    flags
+}
+
+/// Restores the flag word saved by [`disable_interrupts`].
+///
+/// # Safety
+///
+/// `flags` must come from [`disable_interrupts`] on the same stack.
+pub unsafe fn restore_interrupts(flags: u64) {
+    unsafe { asm!("push {}", "popfq", in(reg) flags, options(nomem)) }
+}

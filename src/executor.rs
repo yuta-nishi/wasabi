@@ -8,11 +8,12 @@
 //! Nothing here is preemptive. A future must return `Pending` for other tasks to
 //! get a turn, which is what [`yield_now`] is for.
 
+use crate::interrupts::TICKS;
+use crate::mutex::Mutex;
 use crate::x86::hlt;
 use alloc::boxed::Box;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use core::cell::RefCell;
 use core::cell::UnsafeCell;
 use core::future::Future;
 use core::pin::Pin;
@@ -26,6 +27,8 @@ use core::task::Waker;
 pub struct Task {
     future: UnsafeCell<Pin<Box<dyn Future<Output = ()>>>>,
     woken: AtomicBool,
+    /// Set once the future returned `Ready`; the executor must not poll it again.
+    done: AtomicBool,
 }
 
 impl Task {
@@ -33,16 +36,26 @@ impl Task {
         Self {
             future: UnsafeCell::new(Box::pin(future)),
             woken: AtomicBool::new(true),
+            done: AtomicBool::new(false),
         }
     }
 
-    fn poll(self: &Arc<Self>) {
+    /// Polls the future once and reports whether the task ran. A finished task
+    /// is never polled again: the state machine must not be resumed after it
+    /// returned `Ready`.
+    fn poll(self: &Arc<Self>) -> bool {
+        if self.done.load(Ordering::Acquire) {
+            return false;
+        }
         let waker = Waker::from(self.clone());
         let mut context = Context::from_waker(&waker);
         // SAFETY: the executor polls a task from one place at a time, and the
         // future is pinned, so handing out `&mut` here cannot alias a poll.
         let future = unsafe { &mut *self.future.get() };
-        let _ = future.as_mut().poll(&mut context);
+        if future.as_mut().poll(&mut context).is_ready() {
+            self.done.store(true, Ordering::Release);
+        }
+        true
     }
 }
 
@@ -63,13 +76,8 @@ impl alloc::task::Wake for Task {
 
 /// Runs `async` tasks one at a time, in spawn order, whenever they are woken.
 pub struct Executor {
-    tasks: RefCell<Vec<Arc<Task>>>,
+    tasks: Mutex<Vec<Arc<Task>>>,
 }
-
-// SAFETY: the OS is single-threaded and nothing here is touched from an
-// interrupt yet; the `RefCell` only guards the task list against re-entrant
-// borrows.
-unsafe impl Sync for Executor {}
 
 impl Default for Executor {
     fn default() -> Self {
@@ -80,35 +88,55 @@ impl Default for Executor {
 impl Executor {
     pub const fn new() -> Self {
         Self {
-            tasks: RefCell::new(Vec::new()),
+            tasks: Mutex::new(Vec::new()),
         }
     }
 
     /// Adds a future and returns the task that owns it.
     pub fn spawn(&self, future: impl Future<Output = ()> + 'static) -> Arc<Task> {
         let task = Arc::new(Task::new(future));
-        self.tasks.borrow_mut().push(task.clone());
+        self.tasks.lock().push(task.clone());
         task
+    }
+
+    /// Marks every task as woken, so the next round polls all of them. The timer
+    /// interrupt calls this: time has moved on, so a `sleep` may have expired
+    /// even though nobody woke it.
+    pub fn wake_all(&self) {
+        for task in self.tasks.lock().iter() {
+            task.woken.store(true, Ordering::Release);
+        }
     }
 
     /// Polls every task that has been woken and reports how many ran.
     pub fn run_ready(&self) -> usize {
+        // Take a snapshot so a task that spawns another one cannot deadlock the
+        // lock that protects the list.
+        let tasks: Vec<Arc<Task>> = self.tasks.lock().clone();
         let mut ran = 0;
-        let count = self.tasks.borrow().len();
-        for index in 0..count {
-            let task = self.tasks.borrow()[index].clone();
-            if task.woken.swap(false, Ordering::AcqRel) {
-                task.poll();
+        for task in tasks {
+            if task.woken.swap(false, Ordering::AcqRel) && task.poll() {
                 ran += 1;
             }
         }
         ran
     }
 
-    /// Runs tasks forever, idling the CPU while none of them is ready.
+    /// Runs tasks forever. A timer tick marks every task woken, because time may
+    /// have passed a `sleep` deadline; when nothing is ready the CPU sleeps
+    /// until the next interrupt instead of spinning.
     pub fn run(&self) -> ! {
+        let mut last_ticks = TICKS.load(Ordering::Relaxed);
         loop {
-            if self.run_ready() == 0 {
+            let ticks = TICKS.load(Ordering::Relaxed);
+            if ticks != last_ticks {
+                last_ticks = ticks;
+                self.wake_all();
+            }
+            self.run_ready();
+            // Nothing can make progress until time moves: sleep until the timer
+            // (or any other interrupt) arrives.
+            if TICKS.load(Ordering::Relaxed) == ticks {
                 hlt();
             }
         }
