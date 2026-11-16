@@ -64,6 +64,21 @@ pub fn init_screen(efi_system_table: &EfiSystemTable) -> Result<()> {
     Ok(())
 }
 
+/// Starts the timer interrupt: remaps the PIC, drives the PIT at `hz` and
+/// enables interrupts.
+///
+/// Both halves matter. Without the PIT nothing ever wakes the executor, and
+/// without `sti` the CPU never even takes the interrupt; either way the tasks
+/// stop after their first poll and the executor spins in `hlt`.
+pub fn init_interrupts(hz: u32) {
+    crate::interrupts::remap_pic();
+    crate::interrupts::start_pit(hz);
+    // SAFETY: `exceptions::init` has loaded an IDT, and the timer stub sends
+    // EOI, so the interrupt is handled and execution resumes.
+    crate::x86::enable_interrupts();
+    info!("interrupts: PIC remapped, PIT at {hz} Hz, interrupts enabled");
+}
+
 /// Finds the HPET through ACPI and starts it, so `timer::nanoseconds()` works.
 pub fn init_timer(efi_system_table: &EfiSystemTable) -> Result<()> {
     let rsdp = efi_system_table

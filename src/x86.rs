@@ -4,6 +4,11 @@ pub fn hlt() {
     unsafe { asm!("hlt") }
 }
 
+/// Lets the CPU take interrupts again. Until this runs, `hlt` never returns.
+pub fn enable_interrupts() {
+    unsafe { asm!("sti") }
+}
+
 pub fn write_io_port_u8(port: u16, data: u8) {
     unsafe {
         asm!("out dx, al",
