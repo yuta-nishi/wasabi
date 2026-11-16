@@ -6,6 +6,7 @@ pub mod acpi;
 pub mod allocator;
 pub mod console;
 pub mod debug;
+pub mod demo;
 pub mod exceptions;
 pub mod executor;
 pub mod gdt;

@@ -2,21 +2,18 @@
 #![no_main]
 
 use core::panic::PanicInfo;
-use core::time::Duration;
+use wasabi::demo;
 use wasabi::error;
 use wasabi::exceptions;
-use wasabi::executor::Executor;
 use wasabi::info;
 use wasabi::init::init_basic_runtime;
 use wasabi::init::init_paging;
 use wasabi::init::init_screen;
 use wasabi::init::init_timer;
-use wasabi::interrupts;
 use wasabi::paging;
 use wasabi::println;
 use wasabi::qemu::QemuExitCode;
 use wasabi::qemu::exit_qemu;
-use wasabi::timer;
 use wasabi::uefi::EfiHandle;
 use wasabi::uefi::EfiMemoryType;
 use wasabi::uefi::EfiStatus;
@@ -59,47 +56,8 @@ extern "efiapi" fn efi_main(
     info!("paging: switched to our own tables");
     paging::dump_root();
 
-    EXECUTOR.spawn(async {
-        for step in 0..3 {
-            info!(
-                "task a: step {step} at {} ms",
-                timer::nanoseconds() / 1_000_000
-            );
-            timer::sleep(Duration::from_millis(50)).await;
-        }
-        info!("task a: done");
-    });
-    interrupts::remap_pic();
-    interrupts::start_pit(1_000);
-    info!("interrupts: PIT firing at 1 kHz");
-    unsafe { core::arch::asm!("sti") };
-
-    EXECUTOR.spawn(async {
-        let mut last = 0;
-        loop {
-            let now = interrupts::TICKS.load(core::sync::atomic::Ordering::Relaxed);
-            if now >= last + 1_000 {
-                info!("timer ticks: {now}");
-                last = now;
-            }
-            timer::sleep(Duration::from_millis(100)).await;
-        }
-    });
-    EXECUTOR.spawn(async {
-        for step in 0..3 {
-            info!(
-                "task b: step {step} at {} ms",
-                timer::nanoseconds() / 1_000_000
-            );
-            timer::sleep(Duration::from_millis(30)).await;
-        }
-        info!("task b: done");
-    });
-    EXECUTOR.run()
+    demo::run()
 }
-
-/// The executor the OS runs its tasks on.
-static EXECUTOR: Executor = Executor::new();
 
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
