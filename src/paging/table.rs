@@ -264,4 +264,3 @@ fn next(entry: Entry) -> &'static [Entry] {
     // SAFETY: a present entry without PS points at the next level.
     unsafe { core::slice::from_raw_parts(address, ENTRIES) }
 }
-

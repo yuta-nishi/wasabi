@@ -1,12 +1,12 @@
 //! Printing what the page tables say.
 
+use super::table::ADDRESS_MASK;
 use super::table::Entry;
 use super::table::Level;
 use super::table::Step;
 use super::table::Translation;
 use super::table::root;
 use super::table::translate;
-use super::table::ADDRESS_MASK;
 use crate::info;
 use crate::x86::read_cr3;
 use core::fmt;
