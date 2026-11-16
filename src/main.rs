@@ -8,24 +8,21 @@ use core::writeln;
 use wasabi::error;
 use wasabi::exceptions;
 use wasabi::executor::Executor;
-use wasabi::graphics::Bitmap;
-use wasabi::graphics::draw_test_pattern;
-use wasabi::graphics::fill_rect;
 use wasabi::info;
 use wasabi::init::init_basic_runtime;
 use wasabi::init::init_paging;
+use wasabi::init::init_screen;
 use wasabi::interrupts;
 use wasabi::paging;
 use wasabi::println;
 use wasabi::qemu::QemuExitCode;
 use wasabi::qemu::exit_qemu;
 use wasabi::timer;
+use wasabi::uefi::BitmapTextWriter;
 use wasabi::uefi::EfiHandle;
 use wasabi::uefi::EfiMemoryType;
 use wasabi::uefi::EfiStatus;
 use wasabi::uefi::EfiSystemTable;
-use wasabi::uefi::VramTextWriter;
-use wasabi::uefi::init_vram;
 use wasabi::uefi::locate_loaded_image_protocol;
 
 #[unsafe(no_mangle)]
@@ -33,12 +30,8 @@ extern "efiapi" fn efi_main(
     image_handle: EfiHandle,
     efi_system_table: &EfiSystemTable,
 ) -> EfiStatus {
-    let mut vram = init_vram(efi_system_table).expect("init_vram failed");
-    let vw = vram.width();
-    let vh = vram.height();
-    fill_rect(&mut vram, 0x000000, 0, 0, vw, vh).expect("fill_rect failed");
-    draw_test_pattern(&mut vram);
-    let mut w = VramTextWriter::new(&mut vram);
+    let mut vram = init_screen(efi_system_table).expect("init_screen failed");
+    let mut w = BitmapTextWriter::new(&mut vram);
     let loaded_image = locate_loaded_image_protocol(image_handle, efi_system_table)
         .expect("locate_loaded_image_protocol failed");
     info!(

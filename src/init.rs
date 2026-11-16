@@ -1,14 +1,20 @@
 //! Startup steps that turn a UEFI application into a standalone OS.
 
 use crate::allocator::ALLOCATOR;
+use crate::graphics::Bitmap;
+use crate::graphics::draw_test_pattern;
+use crate::graphics::fill_rect;
 use crate::info;
 use crate::paging::PAGE_SIZE;
 use crate::paging::PageTables;
+use crate::result::Result;
 use crate::uefi::EfiHandle;
 use crate::uefi::EfiMemoryType;
 use crate::uefi::EfiSystemTable;
 use crate::uefi::MemoryMapHolder;
+use crate::uefi::VramBufferInfo;
 use crate::uefi::exit_from_efi_boot_services;
+use crate::uefi::init_vram;
 
 /// Leaves the firmware behind: fetches the memory map, exits boot services and
 /// hands the now-frozen conventional-memory regions to the heap allocator.
@@ -46,4 +52,13 @@ pub fn init_paging(memory_map: &MemoryMapHolder) -> PageTables {
     tables.unmap_page(0);
     info!("paging: identity-mapped {PAGE_SIZE:#x}..{end:#x}, page 0 is unmapped");
     tables
+}
+
+/// Takes over the firmware's framebuffer, clears it and paints the test pattern.
+pub fn init_screen(efi_system_table: &EfiSystemTable) -> Result<VramBufferInfo> {
+    let mut vram = init_vram(efi_system_table)?;
+    let (width, height) = (vram.width(), vram.height());
+    fill_rect(&mut vram, 0x000000, 0, 0, width, height)?;
+    draw_test_pattern(&mut vram);
+    Ok(vram)
 }
