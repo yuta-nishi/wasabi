@@ -63,3 +63,14 @@ pub fn init_screen(efi_system_table: &EfiSystemTable) -> Result<()> {
     crate::console::install_screen(vram);
     Ok(())
 }
+
+/// Finds the HPET through ACPI and starts it, so `timer::nanoseconds()` works.
+pub fn init_timer(efi_system_table: &EfiSystemTable) -> Result<()> {
+    let rsdp = efi_system_table
+        .acpi_rsdp()
+        .ok_or("the firmware has no ACPI table")?;
+    let base = crate::timer::base_from_acpi(rsdp)?;
+    info!("timer: HPET registers at {base:#018x}");
+    // SAFETY: the ACPI table points at the HPET's memory-mapped registers.
+    unsafe { crate::timer::init(base) }
+}

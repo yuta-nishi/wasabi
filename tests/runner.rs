@@ -38,12 +38,7 @@ extern "efiapi" fn efi_main(
     // GDT/IDT (its interrupt handlers would not survive the switch).
     let _memory_map = init_basic_runtime(image_handle, efi_system_table);
     let _exceptions = wasabi::exceptions::init();
-    let rsdp = efi_system_table
-        .acpi_rsdp()
-        .expect("the firmware has no ACPI table");
-    let hpet_base = wasabi::timer::base_from_acpi(rsdp).expect("no HPET in ACPI");
-    // SAFETY: the ACPI table points at the HPET's memory-mapped registers.
-    unsafe { wasabi::timer::init(hpet_base) }.expect("initializing the HPET failed");
+    wasabi::init::init_timer(efi_system_table).expect("initializing the timer failed");
 
     run_tests(&[
         (

@@ -10,6 +10,7 @@ use wasabi::info;
 use wasabi::init::init_basic_runtime;
 use wasabi::init::init_paging;
 use wasabi::init::init_screen;
+use wasabi::init::init_timer;
 use wasabi::interrupts;
 use wasabi::paging;
 use wasabi::println;
@@ -51,13 +52,7 @@ extern "efiapi" fn efi_main(
     paging::dump_translation(0);
     paging::dump_translation(efi_main as *const () as usize as u64);
 
-    let rsdp = efi_system_table
-        .acpi_rsdp()
-        .expect("the firmware has no ACPI table");
-    let hpet_base = timer::base_from_acpi(rsdp).expect("no HPET in ACPI");
-    info!("paging: HPET registers at {hpet_base:#018x}");
-    // SAFETY: the ACPI table points at the HPET's memory-mapped registers.
-    unsafe { timer::init(hpet_base) }.expect("initializing the HPET failed");
+    init_timer(efi_system_table).expect("initializing the timer failed");
 
     let tables = init_paging(&memory_map);
     tables.switch();
