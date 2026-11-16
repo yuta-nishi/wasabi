@@ -1,4 +1,7 @@
-//! Serial port (COM1) output for debugging.
+//! The serial port (COM1), one of the two sinks `print!` writes to.
+//!
+//! `src/console.rs` owns the `print!` family and forwards each chunk here and to
+//! the framebuffer; this module only knows how to put bytes on COM1.
 //!
 //! `scripts/launch_qemu.sh` starts QEMU with `-serial stdio`, so everything
 //! written here shows up in the terminal that runs `cargo test` or `cargo run`.
@@ -6,7 +9,6 @@
 use crate::x86::read_io_port_u8;
 use crate::x86::write_io_port_u8;
 use core::fmt;
-use core::fmt::Write;
 
 const COM1: u16 = 0x3f8;
 /// The line status register; bit 5 is set while the transmitter can take a byte.
@@ -27,58 +29,4 @@ impl fmt::Write for Serial {
         }
         Ok(())
     }
-}
-
-/// Writes `s` to the serial port without a trailing newline.
-pub fn print_str(s: &str) {
-    let _ = Serial.write_str(s);
-}
-
-/// Writes formatted text to the serial port without a trailing newline.
-pub fn print_fmt(args: fmt::Arguments) {
-    let _ = Serial.write_fmt(args);
-}
-
-/// Prints to the serial port.
-#[macro_export]
-macro_rules! print {
-    ($($arg:tt)*) => {
-        $crate::serial::print_fmt(format_args!($($arg)*))
-    };
-}
-
-/// Prints to the serial port with a trailing newline.
-#[macro_export]
-macro_rules! println {
-    () => {
-        $crate::serial::print_str("\n")
-    };
-    ($($arg:tt)*) => {{
-        $crate::serial::print_fmt(format_args!($($arg)*));
-        $crate::serial::print_str("\n");
-    }};
-}
-
-/// Logs an informational message with its source location.
-#[macro_export]
-macro_rules! info {
-    ($($arg:tt)*) => {
-        $crate::print!("[INFO]  {}:{:<3}: {}\n", file!(), line!(), format_args!($($arg)*))
-    };
-}
-
-/// Logs a warning with its source location.
-#[macro_export]
-macro_rules! warn {
-    ($($arg:tt)*) => {
-        $crate::print!("[WARN]  {}:{:<3}: {}\n", file!(), line!(), format_args!($($arg)*))
-    };
-}
-
-/// Logs an error with its source location.
-#[macro_export]
-macro_rules! error {
-    ($($arg:tt)*) => {
-        $crate::print!("[ERROR] {}:{:<3}: {}\n", file!(), line!(), format_args!($($arg)*))
-    };
 }

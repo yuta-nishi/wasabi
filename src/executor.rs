@@ -110,15 +110,19 @@ impl Executor {
 
     /// Polls every task that has been woken and reports how many ran.
     pub fn run_ready(&self) -> usize {
-        // Take a snapshot so a task that spawns another one cannot deadlock the
-        // lock that protects the list.
-        let tasks: Vec<Arc<Task>> = self.tasks.lock().clone();
+        // Move the list out while polling: a task that spawns another one takes
+        // the lock, and finished tasks must not stay in it. Nothing is cloned.
+        let mut tasks = core::mem::take(&mut *self.tasks.lock());
         let mut ran = 0;
-        for task in tasks {
+        for task in &tasks {
             if task.woken.swap(false, Ordering::AcqRel) && task.poll() {
                 ran += 1;
             }
         }
+        tasks.retain(|task| !task.done.load(Ordering::Acquire));
+        let mut tasks_now = self.tasks.lock();
+        tasks.extend(core::mem::take(&mut *tasks_now));
+        *tasks_now = tasks;
         ran
     }
 

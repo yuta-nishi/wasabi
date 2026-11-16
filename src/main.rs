@@ -1,31 +1,23 @@
 #![no_std]
 #![no_main]
 
-use core::fmt::Write;
 use core::panic::PanicInfo;
-use core::time::Duration;
-use core::writeln;
+use wasabi::demo;
 use wasabi::error;
 use wasabi::exceptions;
-use wasabi::executor::Executor;
-use wasabi::graphics::Bitmap;
-use wasabi::graphics::draw_test_pattern;
-use wasabi::graphics::fill_rect;
 use wasabi::info;
 use wasabi::init::init_basic_runtime;
 use wasabi::init::init_paging;
-use wasabi::interrupts;
+use wasabi::init::init_screen;
+use wasabi::init::init_timer;
 use wasabi::paging;
 use wasabi::println;
 use wasabi::qemu::QemuExitCode;
 use wasabi::qemu::exit_qemu;
-use wasabi::timer;
 use wasabi::uefi::EfiHandle;
 use wasabi::uefi::EfiMemoryType;
 use wasabi::uefi::EfiStatus;
 use wasabi::uefi::EfiSystemTable;
-use wasabi::uefi::VramTextWriter;
-use wasabi::uefi::init_vram;
 use wasabi::uefi::locate_loaded_image_protocol;
 
 #[unsafe(no_mangle)]
@@ -33,12 +25,7 @@ extern "efiapi" fn efi_main(
     image_handle: EfiHandle,
     efi_system_table: &EfiSystemTable,
 ) -> EfiStatus {
-    let mut vram = init_vram(efi_system_table).expect("init_vram failed");
-    let vw = vram.width();
-    let vh = vram.height();
-    fill_rect(&mut vram, 0x000000, 0, 0, vw, vh).expect("fill_rect failed");
-    draw_test_pattern(&mut vram);
-    let mut w = VramTextWriter::new(&mut vram);
+    init_screen(efi_system_table).expect("init_screen failed");
     let loaded_image = locate_loaded_image_protocol(image_handle, efi_system_table)
         .expect("locate_loaded_image_protocol failed");
     info!(
@@ -52,75 +39,25 @@ extern "efiapi" fn efi_main(
             continue;
         }
         total_memory_pages += e.number_of_pages();
-        writeln!(w, "{e:?}").unwrap();
+        println!("{e:?}");
     }
     let total_memory_size_mib = total_memory_pages * 4096 / 1024 / 1024;
-    writeln!(
-        w,
-        "Total: {total_memory_pages} pages = {total_memory_size_mib} MiB"
-    )
-    .unwrap();
-    writeln!(w, "Hello, Non-UEFI world!").unwrap();
+    println!("Total: {total_memory_pages} pages = {total_memory_size_mib} MiB");
     println!("Hello, Non-UEFI world!");
     let _exceptions = exceptions::init();
     paging::dump_root();
     paging::dump_translation(0);
     paging::dump_translation(efi_main as *const () as usize as u64);
 
-    let rsdp = efi_system_table
-        .acpi_rsdp()
-        .expect("the firmware has no ACPI table");
-    let hpet_base = timer::base_from_acpi(rsdp).expect("no HPET in ACPI");
-    info!("paging: HPET registers at {hpet_base:#018x}");
-    // SAFETY: the ACPI table points at the HPET's memory-mapped registers.
-    unsafe { timer::init(hpet_base) }.expect("initializing the HPET failed");
+    init_timer(efi_system_table).expect("initializing the timer failed");
 
     let tables = init_paging(&memory_map);
     tables.switch();
     info!("paging: switched to our own tables");
     paging::dump_root();
 
-    EXECUTOR.spawn(async {
-        for step in 0..3 {
-            info!(
-                "task a: step {step} at {} ms",
-                timer::nanoseconds() / 1_000_000
-            );
-            timer::sleep(Duration::from_millis(50)).await;
-        }
-        info!("task a: done");
-    });
-    interrupts::remap_pic();
-    interrupts::start_pit(1_000);
-    info!("interrupts: PIT firing at 1 kHz");
-    unsafe { core::arch::asm!("sti") };
-
-    EXECUTOR.spawn(async {
-        let mut last = 0;
-        loop {
-            let now = interrupts::TICKS.load(core::sync::atomic::Ordering::Relaxed);
-            if now >= last + 1_000 {
-                info!("timer ticks: {now}");
-                last = now;
-            }
-            timer::sleep(Duration::from_millis(100)).await;
-        }
-    });
-    EXECUTOR.spawn(async {
-        for step in 0..3 {
-            info!(
-                "task b: step {step} at {} ms",
-                timer::nanoseconds() / 1_000_000
-            );
-            timer::sleep(Duration::from_millis(30)).await;
-        }
-        info!("task b: done");
-    });
-    EXECUTOR.run()
+    demo::run()
 }
-
-/// The executor the OS runs its tasks on.
-static EXECUTOR: Executor = Executor::new();
 
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
