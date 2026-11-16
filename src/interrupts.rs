@@ -4,7 +4,6 @@
 //! exceptions, so it is remapped to 32..47 first. IRQ0 is then driven by the PIT
 //! at a fixed frequency, and the handler acknowledges it through the PIC's EOI.
 
-use crate::x86::read_io_port_u8;
 use crate::x86::write_io_port_u8;
 use core::sync::atomic::AtomicU64;
 
@@ -66,11 +65,6 @@ pub fn start_pit(hz: u32) {
     write_io_port_u8(PIT_COMMAND, 0x36);
     write_io_port_u8(PIT_CHANNEL0, divisor as u8);
     write_io_port_u8(PIT_CHANNEL0, (divisor >> 8) as u8);
-}
-
-/// Reads the interrupt mask of the master PIC (useful for debugging).
-pub fn master_mask() -> u8 {
-    read_io_port_u8(PIC1_DATA)
 }
 
 /// Tells the PIC that the current interrupt has been handled.

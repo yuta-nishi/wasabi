@@ -104,13 +104,6 @@ pub unsafe fn init(base: u64) -> Result<()> {
     Ok(())
 }
 
-/// Ticks of the free-running main counter.
-pub fn ticks() -> u64 {
-    let guard = HPET.lock();
-    let hpet = guard.as_ref().expect("timer::init has not run yet");
-    hpet.ticks()
-}
-
 /// Nanoseconds, counted from whenever the HPET's counter started.
 pub fn nanoseconds() -> u64 {
     let guard = HPET.lock();
