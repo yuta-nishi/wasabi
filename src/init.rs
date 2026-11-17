@@ -9,6 +9,7 @@ use crate::info;
 use crate::interrupts;
 use crate::paging::PAGE_SIZE;
 use crate::paging::PageTables;
+use crate::pci::ConfigSpace;
 use crate::result::Result;
 use crate::serial::Serial;
 use crate::timer;
@@ -40,6 +41,15 @@ pub fn init_basic_runtime(
         .count();
     info!("the heap is built from {regions} conventional-memory regions");
     memory_map
+}
+
+/// Finds the ECAM window described by ACPI and lists the functions behind it.
+pub fn init_pci(efi_system_table: &EfiSystemTable) -> Result<()> {
+    let rsdp = efi_system_table
+        .acpi_rsdp()
+        .ok_or("the firmware has no ACPI table")?;
+    ConfigSpace::from_acpi(rsdp)?.probe();
+    Ok(())
 }
 
 /// Programs COM1 and proves both directions work by looping a byte back.
