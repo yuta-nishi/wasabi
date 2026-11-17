@@ -7,6 +7,7 @@ use wasabi::error;
 use wasabi::exceptions;
 use wasabi::info;
 use wasabi::init::init_basic_runtime;
+use wasabi::init::init_interrupts;
 use wasabi::init::init_paging;
 use wasabi::init::init_screen;
 use wasabi::init::init_timer;
@@ -55,6 +56,8 @@ extern "efiapi" fn efi_main(
     tables.switch();
     info!("paging: switched to our own tables");
     paging::dump_root();
+
+    init_interrupts(1_000);
 
     demo::run()
 }
