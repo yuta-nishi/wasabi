@@ -17,6 +17,7 @@ pub mod input;
 pub mod interrupts;
 pub mod mutex;
 pub mod paging;
+pub mod pci;
 pub mod qemu;
 pub mod result;
 pub mod serial;

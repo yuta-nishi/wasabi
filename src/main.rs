@@ -9,6 +9,7 @@ use wasabi::info;
 use wasabi::init::init_basic_runtime;
 use wasabi::init::init_interrupts;
 use wasabi::init::init_paging;
+use wasabi::init::init_pci;
 use wasabi::init::init_screen;
 use wasabi::init::init_serial;
 use wasabi::init::init_timer;
@@ -58,6 +59,8 @@ extern "efiapi" fn efi_main(
     tables.switch();
     info!("paging: switched to our own tables");
     paging::dump_root();
+
+    init_pci(efi_system_table).expect("listing the PCI devices failed");
 
     init_interrupts(1_000).expect("initializing the timer interrupt failed");
 

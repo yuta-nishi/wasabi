@@ -105,6 +105,57 @@ impl Xsdt {
     }
 }
 
+/// `MCFG` (PCI Firmware spec 4.1.2): where each PCI segment's ECAM lives.
+///
+/// Only the first entry is used so far: every bus we scan is in one segment.
+#[repr(C, packed)]
+pub struct Mcfg {
+    header: TableHeader,
+    _reserved: u64,
+}
+
+/// One ECAM window: the base address, the segment, and the bus range it covers.
+#[repr(C, packed)]
+#[derive(Clone, Copy)]
+pub struct McfgEntry {
+    base_address: u64,
+    _segment: u16,
+    start_bus: u8,
+    end_bus: u8,
+    _reserved: u32,
+}
+const _: () = assert!(size_of::<McfgEntry>() == 16);
+
+impl Mcfg {
+    fn entry_count(&self) -> usize {
+        (self.header.length as usize - size_of::<Mcfg>()) / size_of::<McfgEntry>()
+    }
+
+    /// The ECAM windows the table describes.
+    pub fn entries(&self) -> impl Iterator<Item = McfgEntry> + '_ {
+        let entries = unsafe {
+            (self as *const Mcfg as *const u8).add(size_of::<Mcfg>()) as *const McfgEntry
+        };
+        (0..self.entry_count()).map(move |index| {
+            // SAFETY: `index` is below `entry_count`, so it stays inside the
+            // table, and the entry is read by value because the table is packed.
+            unsafe { entries.add(index).read_unaligned() }
+        })
+    }
+}
+
+impl McfgEntry {
+    pub fn base_address(&self) -> u64 {
+        self.base_address
+    }
+    pub fn start_bus(&self) -> u8 {
+        self.start_bus
+    }
+    pub fn end_bus(&self) -> u8 {
+        self.end_bus
+    }
+}
+
 /// A memory address as ACPI describes it (ACPI 6.5, 5.2.3.2). The address is
 /// only a memory address when the space says so.
 #[repr(C, packed)]
