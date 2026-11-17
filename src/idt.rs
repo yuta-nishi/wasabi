@@ -9,6 +9,7 @@
 //! anything else reports and stops the run.
 
 use crate::error;
+use crate::interrupts;
 use crate::qemu::QemuExitCode;
 use crate::qemu::exit_qemu;
 use crate::x86::DescriptorTablePointer;
@@ -151,8 +152,8 @@ impl Idt {
 
 /// Counts a timer interrupt and acknowledges it.
 pub(crate) extern "C" fn timer_tick() {
-    crate::interrupts::TICKS.fetch_add(1, Ordering::Relaxed);
-    crate::interrupts::send_eoi();
+    interrupts::TICKS.fetch_add(1, Ordering::Relaxed);
+    interrupts::send_eoi();
 }
 
 /// Reports an unexpected exception and stops the run. It is called from

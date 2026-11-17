@@ -5,6 +5,7 @@ use super::ffi::EfiHandle;
 use super::ffi::EfiStatus;
 use super::ffi::Out;
 use super::memory_map::MemoryMapHolder;
+use crate::result::Result;
 use crate::acpi::Rsdp;
 use core::ffi::c_void;
 use core::mem::offset_of;
@@ -200,7 +201,7 @@ pub struct EfiLoadedImageProtocol {
 pub fn locate_loaded_image_protocol<'a>(
     image_handle: EfiHandle,
     efi_system_table: &EfiSystemTable,
-) -> crate::result::Result<&'a EfiLoadedImageProtocol> {
+) -> Result<&'a EfiLoadedImageProtocol> {
     // SAFETY: the protocol is owned by the firmware and outlives this program.
     unsafe {
         efi_system_table
