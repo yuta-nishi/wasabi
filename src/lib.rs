@@ -13,6 +13,7 @@ pub mod gdt;
 pub mod graphics;
 pub mod idt;
 pub mod init;
+pub mod input;
 pub mod interrupts;
 pub mod mutex;
 pub mod paging;

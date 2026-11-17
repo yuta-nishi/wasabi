@@ -14,6 +14,7 @@ use crate::uefi::EfiSystemTable;
 use crate::uefi::MemoryMapHolder;
 use crate::uefi::exit_from_efi_boot_services;
 use crate::uefi::init_vram;
+use core::sync::atomic::Ordering;
 
 /// Leaves the firmware behind: fetches the memory map, exits boot services and
 /// hands the now-frozen conventional-memory regions to the heap allocator.
@@ -64,19 +65,32 @@ pub fn init_screen(efi_system_table: &EfiSystemTable) -> Result<()> {
     Ok(())
 }
 
-/// Starts the timer interrupt: remaps the PIC, drives the PIT at `hz` and
-/// enables interrupts.
+/// Starts the timer interrupt: remaps the PIC, drives the PIT at `hz`, enables
+/// interrupts, and waits for the first tick.
 ///
 /// Both halves matter. Without the PIT nothing ever wakes the executor, and
 /// without `sti` the CPU never even takes the interrupt; either way the tasks
-/// stop after their first poll and the executor spins in `hlt`.
-pub fn init_interrupts(hz: u32) {
+/// would stop after their first poll and the executor would spin in `hlt`.
+pub fn init_interrupts(hz: u32) -> Result<()> {
     crate::interrupts::remap_pic();
     crate::interrupts::start_pit(hz);
     // SAFETY: `exceptions::init` has loaded an IDT, and the timer stub sends
     // EOI, so the interrupt is handled and execution resumes.
     crate::x86::enable_interrupts();
+
+    // Prove that a tick arrives, and fail here rather than hanging in `hlt` if
+    // it never does. The HPET is a separate clock from the PIT, so it can bound
+    // the wait without trusting the interrupt being waited for.
+    let start = crate::interrupts::TICKS.load(Ordering::Relaxed);
+    let deadline = crate::timer::nanoseconds() + 10 * u64::from(1_000_000_000u32 / hz);
+    while crate::interrupts::TICKS.load(Ordering::Relaxed) == start {
+        if crate::timer::nanoseconds() >= deadline {
+            return Err("the timer interrupt never fired");
+        }
+        core::hint::spin_loop();
+    }
     info!("interrupts: PIC remapped, PIT at {hz} Hz, interrupts enabled");
+    Ok(())
 }
 
 /// Finds the HPET through ACPI and starts it, so `timer::nanoseconds()` works.

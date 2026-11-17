@@ -57,7 +57,7 @@ extern "efiapi" fn efi_main(
     info!("paging: switched to our own tables");
     paging::dump_root();
 
-    init_interrupts(1_000);
+    init_interrupts(1_000).expect("initializing the timer interrupt failed");
 
     demo::run()
 }

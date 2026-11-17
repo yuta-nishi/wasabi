@@ -9,6 +9,8 @@ mod allocator;
 mod debug;
 #[path = "runner/executor.rs"]
 mod executor;
+#[path = "runner/input.rs"]
+mod input;
 #[path = "runner/interrupts.rs"]
 mod interrupts;
 #[path = "runner/mutex.rs"]
@@ -65,6 +67,23 @@ extern "efiapi" fn efi_main(
         (
             "breakpoint_resumes_execution",
             interrupts::breakpoint_resumes_execution,
+        ),
+        (
+            "a_line_is_handed_over_when_enter_arrives",
+            input::a_line_is_handed_over_when_enter_arrives,
+        ),
+        ("newline_ends_a_line_too", input::newline_ends_a_line_too),
+        (
+            "backspace_takes_one_byte_off_the_end",
+            input::backspace_takes_one_byte_off_the_end,
+        ),
+        (
+            "backspace_on_an_empty_line_is_harmless",
+            input::backspace_on_an_empty_line_is_harmless,
+        ),
+        (
+            "a_line_stops_growing_at_the_capacity",
+            input::a_line_stops_growing_at_the_capacity,
         ),
         (
             "four_level_walk_finds_a_4k_frame",
