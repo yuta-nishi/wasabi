@@ -14,10 +14,26 @@ const COM1: u16 = 0x3f8;
 /// The line status register; bit 5 is set while the transmitter can take a byte.
 const COM1_LINE_STATUS: u16 = COM1 + 5;
 const TRANSMITTER_EMPTY: u8 = 1 << 5;
+/// Bit 0 of the line status register: a received byte is waiting in `COM1`.
+const DATA_READY: u8 = 1 << 0;
 
 /// A writer for COM1. It carries no state (the port itself is the writer), so a
 /// fresh value can be used anywhere without sharing or locking.
 pub struct Serial;
+
+impl Serial {
+    /// The next byte the host has sent, or `None` when none has arrived yet.
+    ///
+    /// The port itself is not touched until the line status says a byte is
+    /// waiting, so this never blocks and a task can poll it from the executor.
+    pub fn try_read(&mut self) -> Option<u8> {
+        if read_io_port_u8(COM1_LINE_STATUS) & DATA_READY == 0 {
+            None
+        } else {
+            Some(read_io_port_u8(COM1))
+        }
+    }
+}
 
 impl fmt::Write for Serial {
     fn write_str(&mut self, s: &str) -> fmt::Result {
