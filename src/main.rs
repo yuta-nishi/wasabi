@@ -10,6 +10,7 @@ use wasabi::init::init_basic_runtime;
 use wasabi::init::init_interrupts;
 use wasabi::init::init_paging;
 use wasabi::init::init_screen;
+use wasabi::init::init_serial;
 use wasabi::init::init_timer;
 use wasabi::paging;
 use wasabi::println;
@@ -26,6 +27,7 @@ extern "efiapi" fn efi_main(
     image_handle: EfiHandle,
     efi_system_table: &EfiSystemTable,
 ) -> EfiStatus {
+    init_serial().expect("initializing the serial port failed");
     init_screen(efi_system_table).expect("init_screen failed");
     let loaded_image = locate_loaded_image_protocol(image_handle, efi_system_table)
         .expect("locate_loaded_image_protocol failed");

@@ -8,6 +8,7 @@ use crate::info;
 use crate::paging::PAGE_SIZE;
 use crate::paging::PageTables;
 use crate::result::Result;
+use crate::serial::Serial;
 use crate::uefi::EfiHandle;
 use crate::uefi::EfiMemoryType;
 use crate::uefi::EfiSystemTable;
@@ -35,6 +36,15 @@ pub fn init_basic_runtime(
         .count();
     info!("the heap is built from {regions} conventional-memory regions");
     memory_map
+}
+
+/// Programs COM1 and proves both directions work by looping a byte back.
+pub fn init_serial() -> Result<()> {
+    let mut serial = Serial;
+    serial.init();
+    serial.loopback_test()?;
+    info!("serial: COM1 at 115200 8N1 with the FIFO on, loopback test passed");
+    Ok(())
 }
 
 /// Builds page tables that identity-map the memory this OS uses and everything
