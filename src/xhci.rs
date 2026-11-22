@@ -9,10 +9,12 @@
 //! transfer request block (TRB) into the command ring and rings the doorbell, and
 //! the controller writes events into the event ring.
 
+use crate::iobox::IoBox;
+use crate::iobox::allocate_uncached;
 use crate::mmio::Mmio;
+use crate::paging::PageTables;
 use crate::result::Result;
 use crate::timer;
-use core::alloc::Layout;
 use core::ptr::read_volatile;
 use core::ptr::write_volatile;
 
@@ -219,37 +221,23 @@ impl Registers {
     }
 }
 
-/// Zeroed, page-aligned memory that stays where it is for the rest of the run.
-///
-/// The controller reads these structures by physical address, so they must not
-/// move; the identity map makes the virtual address the physical one.
-fn allocate(size: usize, align: usize) -> Result<*mut u8> {
-    let layout =
-        Layout::from_size_align(size, align).map_err(|_| "bad allocation layout")?;
-    // SAFETY: the layout has a non-zero size, which `alloc_zeroed` requires.
-    let pointer = unsafe { alloc::alloc::alloc_zeroed(layout) };
-    if pointer.is_null() {
-        Err("out of memory for an xHCI ring")
-    } else {
-        Ok(pointer)
-    }
-}
-
 /// A controller that has been reset, given rings, and started.
 pub struct Controller {
     registers: Registers,
-    command_ring: *mut Trb,
+    command_ring: IoBox<[Trb; RING_TRBS]>,
     command_index: usize,
     command_cycle: bool,
-    event_ring: *mut Trb,
+    event_ring: IoBox<[Trb; RING_TRBS]>,
     event_index: usize,
     event_cycle: bool,
+    _erst: IoBox<[ErstEntry; 1]>,
+    _dcbaa: u64,
 }
 
 impl Controller {
     /// Takes the controller over: halt it, reset it, give it its rings and start
     /// it, then prove the whole chain with a no-op command.
-    pub fn init(registers: Registers) -> Result<Self> {
+    pub fn init(registers: Registers, tables: &mut PageTables) -> Result<Self> {
         let hcsparams1 = registers.read_cap(HCSPARAMS1);
         let max_slots = hcsparams1 & 0xff;
         let max_interrupters = (hcsparams1 >> 8) & 0x7ff;
@@ -271,66 +259,84 @@ impl Controller {
         // 4 KiB pages: the only size this OS allocates.
         registers.write_op(PAGESIZE, 1);
 
+        // SAFETY: an all-zero TRB is a valid, unused block.
+        let command_ring = unsafe { IoBox::<[Trb; RING_TRBS]>::new(tables) };
+        // SAFETY: as above.
+        let event_ring = unsafe { IoBox::<[Trb; RING_TRBS]>::new(tables) };
+        // SAFETY: an all-zero segment table entry describes nothing yet.
+        let erst = unsafe { IoBox::<[ErstEntry; 1]>::new(tables) };
         let mut controller = Self {
             registers,
-            command_ring: allocate(RING_TRBS * size_of_trb(), 4096)? as *mut Trb,
+            command_ring,
             command_index: 0,
             command_cycle: true,
-            event_ring: allocate(RING_TRBS * size_of_trb(), 4096)? as *mut Trb,
+            event_ring,
             event_index: 0,
             event_cycle: true,
+            _erst: erst,
+            _dcbaa: 0,
         };
-        controller.register_rings(max_slots, scratchpad)?;
+        controller.register_rings(tables, max_slots, scratchpad)?;
         controller.start()?;
         controller.check_with_no_op()?;
         Ok(controller)
     }
 
     /// Tells the controller where its device context array and both rings are.
-    fn register_rings(&mut self, max_slots: u32, scratchpad: u32) -> Result<()> {
+    fn register_rings(
+        &mut self,
+        tables: &mut PageTables,
+        max_slots: u32,
+        scratchpad: u32,
+    ) -> Result<()> {
         let registers = &self.registers;
 
         // Device context array: one entry per slot, plus the scratchpad pointer.
         let dcbaa_entries = max_slots as usize + 1;
-        let dcbaa = allocate(dcbaa_entries * 8, 64)? as *mut u64;
+        let dcbaa = allocate_uncached(tables, dcbaa_entries * 8)?;
         if scratchpad > 0 {
             // The first entry points at an array of scratchpad buffers, which the
             // controller uses when it needs a scratch area of its own.
-            let buffers = allocate(scratchpad as usize * 8, 64)? as *mut u64;
+            let buffers = allocate_uncached(tables, scratchpad as usize * 8)? as *mut u64;
             for index in 0..scratchpad as usize {
-                let buffer = allocate(4096, 4096)?;
+                let buffer = allocate_uncached(tables, 4096)?;
                 // SAFETY: `index` is inside the array just allocated.
-                unsafe { write_volatile(buffers.add(index), buffer as u64) };
+                unsafe { write_volatile(buffers.add(index), buffer) };
             }
             // SAFETY: entry 0 exists, since `dcbaa_entries` is at least 1.
-            unsafe { write_volatile(dcbaa, buffers as u64) };
+            unsafe { write_volatile(dcbaa as *mut u64, buffers as u64) };
         }
-        registers.write_op64(DCBAAP, dcbaa as u64);
+        self._dcbaa = dcbaa;
+        registers.write_op64(DCBAAP, dcbaa);
         registers.write_op(CONFIG, max_slots & 0xff);
 
         // Event ring segment table: one segment of `RING_TRBS` TRBs.
-        let erst = allocate(size_of_erste(), 64)? as *mut ErstEntry;
-        // SAFETY: the table holds exactly one entry.
+        // SAFETY: the table holds exactly one entry and nothing else reads it.
         unsafe {
-            write_volatile(
-                erst,
-                ErstEntry {
-                    base: self.event_ring as u64,
-                    size: RING_TRBS as u32,
-                    _reserved: 0,
-                },
-            )
+            *self._erst.as_mut() = [ErstEntry {
+                base: self.event_ring.address(),
+                size: RING_TRBS as u32,
+                _reserved: 0,
+            }]
         };
         registers.write_rt(ERSTSZ, 1);
-        registers.write_rt64(ERSTBA, erst as u64);
-        registers.write_rt64(ERDP, self.event_ring as u64);
+        registers.write_rt64(ERSTBA, self._erst.address());
+        registers.write_rt64(ERDP, self.event_ring.address());
 
         // Command ring: the last TRB links back to the first.
-        let link = Trb::link(self.command_ring as u64, true);
+        let link = Trb::link(self.command_ring.address(), true);
         // SAFETY: the ring has `RING_TRBS` slots and the link goes in the last.
-        unsafe { write_volatile(self.command_ring.add(RING_TRBS - 1), link) };
-        registers.write_op64(CRCR, self.command_ring as u64 | 1);
+        unsafe { write_volatile(self.command_ring_ptr().add(RING_TRBS - 1), link) };
+        registers.write_op64(CRCR, self.command_ring.address() | 1);
         Ok(())
+    }
+
+    fn command_ring_ptr(&self) -> *mut Trb {
+        self.command_ring.address() as *mut Trb
+    }
+
+    fn event_ring_ptr(&self) -> *mut Trb {
+        self.event_ring.address() as *mut Trb
     }
 
     fn start(&mut self) -> Result<()> {
@@ -367,7 +373,7 @@ impl Controller {
             return Err("the command ring needs a lap it cannot do yet");
         }
         // SAFETY: `command_index` is below the link entry at the end.
-        unsafe { write_volatile(self.command_ring.add(self.command_index), trb) };
+        unsafe { write_volatile(self.command_ring_ptr().add(self.command_index), trb) };
         self.command_index += 1;
         self.registers.ring_doorbell(0, 0);
         Ok(())
@@ -378,7 +384,8 @@ impl Controller {
         let deadline = timer::nanoseconds() + TIMEOUT_MS * 1_000_000;
         loop {
             // SAFETY: `event_index` is inside the ring segment.
-            let event = unsafe { read_volatile(self.event_ring.add(self.event_index)) };
+            let event =
+                unsafe { read_volatile(self.event_ring_ptr().add(self.event_index)) };
             if (event.dword3 & 1 != 0) == self.event_cycle {
                 self.event_index += 1;
                 if self.event_index == RING_TRBS {
@@ -388,7 +395,7 @@ impl Controller {
                 // Tell the controller how far the driver has read.
                 self.registers.write_rt64(
                     ERDP,
-                    self.event_ring as u64 + (self.event_index * 16) as u64,
+                    self.event_ring.address() + (self.event_index * 16) as u64,
                 );
                 return Ok(event);
             }
@@ -398,14 +405,6 @@ impl Controller {
             core::hint::spin_loop();
         }
     }
-}
-
-fn size_of_trb() -> usize {
-    core::mem::size_of::<Trb>()
-}
-
-fn size_of_erste() -> usize {
-    core::mem::size_of::<ErstEntry>()
 }
 
 /// `HCSPARAMS2` holds the scratchpad buffer count in two 5-bit halves.

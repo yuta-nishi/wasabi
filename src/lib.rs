@@ -15,6 +15,7 @@ pub mod idt;
 pub mod init;
 pub mod input;
 pub mod interrupts;
+pub mod iobox;
 pub mod mmio;
 pub mod mutex;
 pub mod paging;

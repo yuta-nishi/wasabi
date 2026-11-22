@@ -4,6 +4,7 @@ use crate::x86::read_cr3;
 use crate::x86::write_cr3;
 use alloc::boxed::Box;
 use alloc::vec::Vec;
+use core::arch::asm;
 use core::pin::Pin;
 
 /// Bits 12..51 of an entry hold the physical address of the next level.
@@ -152,6 +153,17 @@ pub fn translate_in(root: &[Entry], address: u64) -> Translation {
     unreachable!("the walk always ends at the PT level");
 }
 
+/// Drops any cached translation for `virtual_address`.
+///
+/// Needed when an entry that was already present changes: the old translation,
+/// with its old attributes, would otherwise keep being used.
+pub fn invalidate_page(virtual_address: u64) {
+    // SAFETY: `invlpg` affects only the translation of that one address.
+    unsafe {
+        asm!("invlpg [{}]", in(reg) virtual_address, options(nostack, preserves_flags))
+    }
+}
+
 /// Walks `address` through the tables `CR3` currently points at.
 pub fn translate(address: u64) -> Translation {
     translate_in(root(), address)
@@ -194,6 +206,17 @@ impl PageTables {
     /// Maps one page, allocating the tables on the way down.
     pub fn map_page(&mut self, virtual_address: u64, physical_address: u64) {
         self.map_page_with(virtual_address, physical_address, PRESENT | WRITABLE);
+    }
+
+    /// Maps `length` bytes from `virtual_address` uncached, whether or not they
+    /// were mapped before, and drops the translations that changed.
+    pub fn map_range_uncached(&mut self, virtual_address: u64, length: u64) {
+        // SAFETY: the pages are mapped below, before anything reads them.
+        for page in 0..length.div_ceil(PAGE_SIZE) {
+            let address = virtual_address + page * PAGE_SIZE;
+            self.map_page_uncached(address, address);
+            invalidate_page(address);
+        }
     }
 
     /// Maps one page of device memory.
