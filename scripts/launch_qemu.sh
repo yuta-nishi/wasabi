@@ -16,6 +16,7 @@ qemu-system-x86_64 \
   -drive format=raw,file=fat:rw:mnt \
   -device isa-debug-exit,iobase=0xf4,iosize=0x01 \
   -no-reboot \
+  -monitor telnet:127.0.0.1:2345,server,nowait \
   -serial stdio \
   "$@"
 RETCODE=$?
