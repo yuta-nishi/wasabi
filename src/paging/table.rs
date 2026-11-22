@@ -10,8 +10,11 @@ use core::pin::Pin;
 pub(super) const ADDRESS_MASK: u64 = 0x000f_ffff_ffff_f000;
 pub(super) const ENTRIES: usize = 512;
 
-/// Size of one page, and therefore of one table.
-pub const PAGE_SIZE: u64 = 4096;
+/// 4 KiB (`1 << 12`): the unit a page table maps, and therefore the size of one
+/// table.
+pub const PAGE_SIZE: u64 = 0x1000;
+/// The address bits below a page boundary.
+const PAGE_OFFSET_MASK: u64 = PAGE_SIZE - 1;
 /// Present: the entry maps something.
 const PRESENT: u64 = 1 << 0;
 /// Writable: writes are allowed through this entry.
@@ -141,7 +144,7 @@ pub fn translate_in(root: &[Entry], address: u64) -> Translation {
             return Translation::Huge(steps, physical);
         }
         if level == Level::Pt {
-            let physical = entry.address() + (address & 0xfff);
+            let physical = entry.address() + (address & PAGE_OFFSET_MASK);
             return Translation::Page(steps, physical);
         }
         table = next(entry);

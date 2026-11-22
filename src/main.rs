@@ -45,7 +45,7 @@ extern "efiapi" fn efi_main(
         total_memory_pages += e.number_of_pages();
         println!("{e:?}");
     }
-    let total_memory_size_mib = total_memory_pages * 4096 / 1024 / 1024;
+    let total_memory_size_mib = total_memory_pages * paging::PAGE_SIZE / 1024 / 1024;
     println!("Total: {total_memory_pages} pages = {total_memory_size_mib} MiB");
     println!("Hello, Non-UEFI world!");
     let _exceptions = exceptions::init();
