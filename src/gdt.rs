@@ -42,7 +42,6 @@ struct Tss {
 }
 const _: () = assert!(size_of::<Tss>() == 104);
 
-/// The GDT as it is laid out in memory.
 #[repr(C)]
 struct GdtBacking {
     null: u64,

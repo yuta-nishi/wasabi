@@ -2,7 +2,6 @@
 
 use super::ffi::EfiMemoryType;
 
-/// One entry of the memory map that `GetMemoryMap` returns.
 #[repr(C)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct EfiMemoryDescriptor {
