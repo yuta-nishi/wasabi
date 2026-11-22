@@ -13,6 +13,7 @@ use wasabi::init::init_pci;
 use wasabi::init::init_screen;
 use wasabi::init::init_serial;
 use wasabi::init::init_timer;
+use wasabi::init::init_xhci;
 use wasabi::paging;
 use wasabi::println;
 use wasabi::qemu::QemuExitCode;
@@ -60,7 +61,9 @@ extern "efiapi" fn efi_main(
     info!("paging: switched to our own tables");
     paging::dump_root();
 
-    init_pci(efi_system_table, &mut tables).expect("listing the PCI devices failed");
+    let registers =
+        init_pci(efi_system_table, &mut tables).expect("listing the PCI devices failed");
+    init_xhci(registers).expect("initializing the xHCI controller failed");
 
     init_interrupts(1_000).expect("initializing the timer interrupt failed");
 

@@ -25,3 +25,4 @@ pub mod test_runner;
 pub mod timer;
 pub mod uefi;
 pub mod x86;
+pub mod xhci;
