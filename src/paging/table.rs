@@ -345,7 +345,7 @@ impl PageTables {
         let base = entry.address();
         let mut pages = Table::zeroed();
         for (index, page) in pages.entries_mut().iter_mut().enumerate() {
-            *page = Entry::from_raw(base + (index as u64) * PAGE_SIZE | flags);
+            *page = Entry::from_raw((base + (index as u64) * PAGE_SIZE) | flags);
         }
         let pages = Box::into_raw(pages);
         *entry = Entry::from_raw(pages as u64 | PRESENT | WRITABLE);

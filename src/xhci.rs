@@ -12,7 +12,9 @@
 //! Register and TRB layouts follow the xHCI specification:
 //! <https://www.intel.com/content/www/us/en/standards/xhci-specification.html>.
 
+use crate::info;
 use crate::iobox::IoBox;
+use crate::iobox::Zeroable;
 use crate::mmio::Mmio;
 use crate::mmio::Window;
 use crate::paging::PageTables;
@@ -33,6 +35,28 @@ const PAGESIZE: usize = 0x08;
 const CRCR: usize = 0x18;
 const DCBAAP: usize = 0x30;
 const CONFIG: usize = 0x38;
+
+/// Port register set, relative to `CAPLENGTH`; each port owns 0x10 bytes.
+const PORT_REGISTERS: usize = 0x400;
+const PORT_SIZE: usize = 0x10;
+/// PORTSC: a device is attached (`CCS`) and the port is enabled (`PED`).
+const PORTSC_CONNECTED: u32 = 1 << 0;
+const PORTSC_ENABLED: u32 = 1 << 1;
+/// PORTSC: writing 1 starts a reset (`PR`).
+const PORTSC_RESET: u32 = 1 << 4;
+/// PORTSC: change bits, cleared by writing 1.
+const PORTSC_CONNECT_CHANGED: u32 = 1 << 17;
+const PORTSC_RESET_CHANGED: u32 = 1 << 21;
+const PORTSC_CHANGES: u32 = PORTSC_CONNECT_CHANGED
+    | PORTSC_RESET_CHANGED
+    | (1 << 18)
+    | (1 << 19)
+    | (1 << 20)
+    | (1 << 22)
+    | (1 << 23);
+
+/// `Enable Slot` (TRB type 9): the controller picks a slot for a device.
+const TRB_ENABLE_SLOT: u32 = 9;
 
 /// Runtime registers of interrupter 0, relative to `RTSOFF`.
 const INTERRUPTER0: usize = 0x20;
@@ -66,7 +90,7 @@ struct Trb {
 }
 
 // SAFETY: a TRB is four integers, so every bit pattern is valid.
-unsafe impl crate::iobox::Zeroable for Trb {}
+unsafe impl Zeroable for Trb {}
 
 /// `No Op Command` (TRB type 23; type 8 is the transfer-ring `No Op`): the
 /// controller completes it without doing anything, which makes it a check that
@@ -76,6 +100,8 @@ const TRB_NO_OP_COMMAND: u32 = 23;
 const TRB_LINK: u32 = 6;
 /// `Command Completion Event` (TRB type 33): the controller's answer to a command.
 const TRB_COMMAND_COMPLETION: u32 = 33;
+/// `Port Status Change Event` (TRB type 34): a port changed on its own.
+const TRB_PORT_STATUS_CHANGE: u32 = 34;
 /// Completion code 1: success.
 const COMPLETION_SUCCESS: u32 = 1;
 
@@ -87,10 +113,23 @@ fn completion_code(trb: &Trb) -> u32 {
     (trb.dword2 >> 24) & 0xff
 }
 
+/// The slot a completion event was about.
+fn slot_id(trb: &Trb) -> u32 {
+    trb.dword3 >> 24
+}
+
 impl Trb {
     fn no_op_command(cycle: bool) -> Self {
         Self {
             dword3: (TRB_NO_OP_COMMAND << 10) | u32::from(cycle),
+            ..Self::default()
+        }
+    }
+
+    /// `Enable Slot`: the controller answers with the slot it picked.
+    fn enable_slot(cycle: bool, slot_type: u32) -> Self {
+        Self {
+            dword3: (TRB_ENABLE_SLOT << 10) | (slot_type << 16) | u32::from(cycle),
             ..Self::default()
         }
     }
@@ -117,10 +156,10 @@ struct ErstEntry {
 }
 
 // SAFETY: a segment table entry is two integers and a reserved word.
-unsafe impl crate::iobox::Zeroable for ErstEntry {}
+unsafe impl Zeroable for ErstEntry {}
 
 // SAFETY: a byte has no invalid bit pattern.
-unsafe impl crate::iobox::Zeroable for [u8; 4096] {}
+unsafe impl Zeroable for [u8; 4096] {}
 
 /// The four register groups, as addresses inside the controller's window.
 pub struct Registers {
@@ -168,6 +207,12 @@ impl Registers {
     /// One entry of the doorbell array, relative to `DBOFF`.
     fn doorbell(&self, slot: u32) -> Mmio<u32> {
         self.window.at(self.dboff as usize + slot as usize * 4)
+    }
+
+    /// The status register of port `port` (numbered from 1).
+    fn port_status(&self, port: u32) -> Mmio<u32> {
+        let offset = PORT_REGISTERS + (port as usize - 1) * PORT_SIZE;
+        self.operational(offset)
     }
 
     /// The version the controller reports, in BCD (`0x0100` is 1.0).
@@ -298,9 +343,10 @@ type Scratchpad = (
     alloc::vec::Vec<IoBox<[u8; 4096]>>,
 );
 
-/// A controller that has been reset, given rings, and started.
-pub struct Controller {
+/// An xHCI host controller that has been reset, given rings, and started.
+pub struct HostController {
     registers: Registers,
+    max_ports: u32,
     command_ring: Ring<RING_TRBS>,
     event_ring: Ring<RING_TRBS>,
     erst: IoBox<[ErstEntry; 1]>,
@@ -308,7 +354,7 @@ pub struct Controller {
     _scratchpad: Option<Scratchpad>,
 }
 
-impl Controller {
+impl HostController {
     /// Takes the controller over: halt it, reset it, give it its rings and start
     /// it, then prove the whole chain with a no-op command.
     pub fn init(registers: Registers, tables: &mut PageTables) -> Result<Self> {
@@ -317,7 +363,7 @@ impl Controller {
         let max_interrupters = (hcsparams1 >> 8) & 0x7ff;
         let max_ports = (hcsparams1 >> 24) & 0xff;
         let scratchpad = scratchpad_count(registers.read_cap(HCSPARAMS2));
-        crate::info!(
+        info!(
             "xhci: {max_slots} slots, {max_interrupters} interrupters, {max_ports} ports, \
              {scratchpad} scratchpad buffers"
         );
@@ -335,6 +381,7 @@ impl Controller {
 
         let mut controller = Self {
             registers,
+            max_ports,
             command_ring: Ring::new(tables),
             event_ring: Ring::new(tables),
             erst: IoBox::new(tables),
@@ -412,20 +459,85 @@ impl Controller {
         self.registers.version()
     }
 
+    /// Port numbers the controller reports, from 1.
+    pub fn ports(&self) -> u32 {
+        self.max_ports
+    }
+
+    /// Resets `port` and waits for the controller to finish, so the device is in
+    /// the default state and can be addressed.
+    fn reset_port(&mut self, port: u32) -> Result<()> {
+        let status = self.registers.port_status(port);
+        let current = status.read();
+        if current & PORTSC_CONNECTED == 0 {
+            return Err("no device on the port");
+        }
+        // Clear whatever change bits the firmware left, then start the reset.
+        status.write(current | PORTSC_CHANGES);
+        status.write(status.read() | PORTSC_RESET | PORTSC_CONNECT_CHANGED);
+
+        let deadline = timer::nanoseconds() + TIMEOUT_MS * 1_000_000;
+        loop {
+            let current = status.read();
+            if current & PORTSC_RESET_CHANGED != 0 {
+                // The reset finished; clear the change bits and check the result.
+                status.write(current | PORTSC_CHANGES);
+                if status.read() & PORTSC_ENABLED == 0 {
+                    return Err("the port did not become enabled");
+                }
+                return Ok(());
+            }
+            if timer::nanoseconds() >= deadline {
+                return Err("the port reset did not finish");
+            }
+            core::hint::spin_loop();
+        }
+    }
+
+    /// Finds connected devices, resets their ports, and lets the controller pick
+    /// a slot for each.
+    pub fn connect_devices(&mut self) -> Result<()> {
+        for port in 1..=self.max_ports {
+            let status = self.registers.port_status(port).read();
+            if status & PORTSC_CONNECTED == 0 {
+                continue;
+            }
+            self.registers
+                .port_status(port)
+                .write(status | PORTSC_CHANGES);
+            info!("xhci: port {port} has a device (portsc {status:#010x})");
+            self.reset_port(port)?;
+            let after = self.registers.port_status(port).read();
+            // Slot type 0 is a USB2 device; a SuperSpeed port asks for type 1.
+            let slot = self.enable_slot(0)?;
+            info!("xhci: port {port} reset (portsc {after:#010x}), slot {slot} assigned");
+        }
+        Ok(())
+    }
+
+    /// Asks the controller for a slot, which is where a device's contexts live.
+    fn enable_slot(&mut self, slot_type: u32) -> Result<u32> {
+        let trb = Trb::enable_slot(self.command_ring.cycle, slot_type);
+        self.command(trb)?;
+        let event = self.wait_for_completion()?;
+        let code = completion_code(&event);
+        if code != COMPLETION_SUCCESS {
+            return Err("the enable slot command failed");
+        }
+        Ok(slot_id(&event))
+    }
+
     /// Sends a no-op command and waits for its completion event: if that arrives,
     /// the doorbell, the command ring, the event ring and the completion path all
     /// work.
     fn check_with_no_op(&mut self) -> Result<()> {
         self.command(Trb::no_op_command(self.command_ring.cycle))?;
-        let event = self.next_event()?;
-        if trb_type(&event) != TRB_COMMAND_COMPLETION {
-            return Err("the xHCI controller sent an unexpected event");
-        }
+        let event = self.wait_for_completion()?;
         let code = completion_code(&event);
         if code != COMPLETION_SUCCESS {
             return Err("the no-op command did not complete successfully");
         }
-        crate::info!("xhci: started, and the no-op command completed");
+        info!("xhci: started, and the no-op command completed");
         Ok(())
     }
 
@@ -434,6 +546,19 @@ impl Controller {
         self.command_ring.push(trb)?;
         self.registers.ring_doorbell(0, 0);
         Ok(())
+    }
+
+    /// Waits for a command's completion, letting events that belong to other
+    /// things pass: ports report changes on their own schedule.
+    fn wait_for_completion(&mut self) -> Result<Trb> {
+        loop {
+            let event = self.next_event()?;
+            match trb_type(&event) {
+                TRB_COMMAND_COMPLETION => return Ok(event),
+                TRB_PORT_STATUS_CHANGE => continue,
+                _ => continue,
+            }
+        }
     }
 
     /// Waits for the next event the controller writes into the event ring.
