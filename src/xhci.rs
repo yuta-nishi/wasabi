@@ -9,6 +9,7 @@
 //! transfer request block (TRB) into the command ring and rings the doorbell, and
 //! the controller writes events into the event ring.
 
+use crate::mmio::Mmio;
 use crate::result::Result;
 use crate::timer;
 use core::alloc::Layout;
@@ -107,32 +108,56 @@ struct ErstEntry {
 
 /// The four register groups, as addresses inside the controller's window.
 pub struct Registers {
-    cap: *mut u8,
-    op: *mut u8,
-    rt: *mut u8,
-    db: *mut u8,
+    window: u64,
+    caplength: u64,
+    rtsoff: u64,
+    dboff: u64,
 }
 
 impl Registers {
     /// Locates the register groups; the window itself must already be mapped.
     pub fn new(window: u64) -> Result<Self> {
-        let cap = window as *mut u8;
         // SAFETY: `window` is the controller's register window, mapped by the
-        // caller, and the capability registers start at its first byte.
-        let caplength = u64::from(unsafe { read_volatile(cap.add(CAPLENGTH)) });
+        // caller; the offsets come from the controller's own registers.
+        let caplength =
+            u64::from(unsafe { Mmio::<u8>::at(window + CAPLENGTH as u64) }.read());
         if caplength == 0 {
             return Err("the xHCI controller reports a zero CAPLENGTH");
         }
-        // SAFETY: as above; the offsets come from the controller's own registers.
-        let dboff = u64::from(unsafe { read_volatile(cap.add(DBOFF) as *const u32) });
-        // SAFETY: as above.
-        let rtsoff = u64::from(unsafe { read_volatile(cap.add(RTSOFF) as *const u32) });
+        let dboff = u64::from(unsafe { Mmio::<u32>::at(window + DBOFF as u64) }.read());
+        let rtsoff = u64::from(unsafe { Mmio::<u32>::at(window + RTSOFF as u64) }.read());
         Ok(Self {
-            cap,
-            op: (window + caplength) as *mut u8,
-            rt: (window + rtsoff) as *mut u8,
-            db: (window + dboff) as *mut u8,
+            window,
+            caplength,
+            rtsoff,
+            dboff,
         })
+    }
+
+    /// One of the capability registers, `offset` bytes into the window.
+    fn capability<T: Copy>(&self, offset: usize) -> Mmio<T> {
+        // SAFETY: the window is device memory and `offset` stays inside it.
+        unsafe { Mmio::at(self.window + offset as u64) }
+    }
+
+    /// One of the operational registers, relative to `CAPLENGTH`.
+    fn operational<T: Copy>(&self, offset: usize) -> Mmio<T> {
+        // SAFETY: as above; `CAPLENGTH` was read from the controller.
+        unsafe { Mmio::at(self.window + self.caplength + offset as u64) }
+    }
+
+    /// One of interrupter 0's runtime registers, relative to `RTSOFF`.
+    fn runtime<T: Copy>(&self, offset: usize) -> Mmio<T> {
+        // SAFETY: as above; `RTSOFF` was read from the controller.
+        unsafe {
+            Mmio::at(self.window + self.rtsoff + INTERRUPTER0 as u64 + offset as u64)
+        }
+    }
+
+    /// One entry of the doorbell array, relative to `DBOFF`.
+    fn doorbell(&self, slot: u32) -> Mmio<u32> {
+        // SAFETY: as above; `DBOFF` was read from the controller.
+        unsafe { Mmio::at(self.window + self.dboff + u64::from(slot) * 4) }
     }
 
     /// The version the controller reports, in BCD (`0x0100` is 1.0).
@@ -143,43 +168,31 @@ impl Registers {
     }
 
     fn read_cap(&self, offset: usize) -> u32 {
-        // SAFETY: `offset` is inside the capability registers.
-        unsafe { read_volatile(self.cap.add(offset) as *const u32) }
+        self.capability::<u32>(offset).read()
     }
 
     fn read_op(&self, offset: usize) -> u32 {
-        // SAFETY: `offset` is inside the operational registers.
-        unsafe { read_volatile(self.op.add(offset) as *const u32) }
+        self.operational::<u32>(offset).read()
     }
 
     fn write_op(&self, offset: usize, value: u32) {
-        // SAFETY: as in `read_op`.
-        unsafe { write_volatile(self.op.add(offset) as *mut u32, value) }
+        self.operational::<u32>(offset).write(value);
     }
 
     fn write_op64(&self, offset: usize, value: u64) {
-        // SAFETY: as in `read_op64`.
-        unsafe { write_volatile(self.op.add(offset) as *mut u64, value) }
+        self.operational::<u64>(offset).write(value);
     }
 
     fn write_rt(&self, offset: usize, value: u32) {
-        // SAFETY: `offset` is inside interrupter 0's registers.
-        unsafe { write_volatile(self.rt.add(INTERRUPTER0 + offset) as *mut u32, value) }
+        self.runtime::<u32>(offset).write(value);
     }
 
     fn write_rt64(&self, offset: usize, value: u64) {
-        // SAFETY: `offset` is inside interrupter 0's registers.
-        unsafe { write_volatile(self.rt.add(INTERRUPTER0 + offset) as *mut u64, value) }
+        self.runtime::<u64>(offset).write(value);
     }
 
     fn ring_doorbell(&self, slot: u32, target: u32) {
-        // SAFETY: doorbell `slot` is inside the doorbell array.
-        unsafe {
-            write_volatile(
-                self.db.add(4 * slot as usize) as *mut u32,
-                (target << 16) | slot,
-            )
-        }
+        self.doorbell(slot).write((target << 16) | slot);
     }
 
     /// Waits until `mask` is clear in `USBSTS`, or gives up.
