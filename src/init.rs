@@ -22,6 +22,8 @@ use crate::uefi::exit_from_efi_boot_services;
 use crate::uefi::init_vram;
 use crate::warn;
 use crate::x86;
+use crate::xhci::Controller;
+use crate::xhci::Registers;
 use core::sync::atomic::Ordering;
 
 /// Leaves the firmware behind: fetches the memory map, exits boot services and
@@ -45,12 +47,12 @@ pub fn init_basic_runtime(
     memory_map
 }
 
-/// Finds the ECAM window described by ACPI, lists the functions behind it, and
-/// gets the xHCI controller ready to be driven.
+/// Finds the ECAM window described by ACPI, lists the functions behind it, maps
+/// and enables the xHCI controller, and returns its register groups.
 pub fn init_pci(
     efi_system_table: &EfiSystemTable,
     tables: &mut PageTables,
-) -> Result<()> {
+) -> Result<Registers> {
     let rsdp = efi_system_table
         .acpi_rsdp()
         .ok_or("the firmware has no ACPI table")?;
@@ -89,6 +91,14 @@ pub fn init_pci(
         (capability & 0xff) as u8,
         ((capability >> 16) & 0xffff) as u16
     );
+    Registers::new(address)
+}
+
+/// Resets the xHCI controller, gives it its rings, starts it, and proves the
+/// command path with a no-op command.
+pub fn init_xhci(registers: Registers) -> Result<()> {
+    let controller = Controller::init(registers)?;
+    info!("xhci: version {:#06x}", controller.version());
     Ok(())
 }
 
