@@ -34,7 +34,6 @@ impl<T: Copy> Mmio<T> {
         unsafe { read_volatile(self.address as *const T) }
     }
 
-    /// Stores a value in the register.
     pub fn write(&self, value: T) {
         // SAFETY: as in `read`.
         unsafe { write_volatile(self.address as *mut T, value) }

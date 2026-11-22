@@ -1,9 +1,7 @@
 //! The serial port (COM1), one of the two sinks `print!` writes to.
 //!
-//! `src/console.rs` owns the `print!` family and forwards each chunk here and to
-//! the framebuffer; this module only knows how to put bytes on COM1.
-//!
-//! `scripts/launch_qemu.sh` starts QEMU with `-serial stdio`, so everything
+//! Only knows how to put bytes on COM1; the `print!` family forwards each chunk
+//! here and to the framebuffer. QEMU is started with `-serial stdio`, so what is
 //! written here shows up in the terminal that runs `cargo test` or `cargo run`.
 
 use crate::result::Result;

@@ -4,7 +4,7 @@ use crate::x86::write_io_port_u8;
 /// The statuses we hand to QEMU through the `isa-debug-exit` device.
 ///
 /// QEMU exits with `(code << 1) | 1`, so `Success` (0x1) makes QEMU exit with 3,
-/// which `scripts/launch_qemu.sh` maps back to a passing `cargo test`.
+/// which the test runner maps back to a passing `cargo test`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
 pub enum QemuExitCode {

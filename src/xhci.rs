@@ -8,6 +8,9 @@
 //! Work is handed over through rings in physical memory: the driver writes a
 //! transfer request block (TRB) into the command ring and rings the doorbell, and
 //! the controller writes events into the event ring.
+//!
+//! Register and TRB layouts follow the xHCI specification:
+//! <https://www.intel.com/content/www/us/en/standards/xhci-specification.html>.
 
 use crate::iobox::IoBox;
 use crate::mmio::Mmio;
@@ -360,8 +363,8 @@ impl Controller {
         let registers = &self.registers;
 
         if scratchpad > 0 {
-            // Entry 0 of the device context array points at an array of
-            // scratchpad buffers, which the controller uses for its own work.
+            // Entry 0 of the device context array is where the controller looks
+            // for the scratchpad buffers it needs for its own work.
             let mut buffers = IoBox::<[u64; MAX_SCRATCHPAD]>::new(tables);
             let mut pages = alloc::vec::Vec::new();
             for index in 0..scratchpad as usize {
@@ -379,7 +382,6 @@ impl Controller {
         registers.write_op64(DCBAAP, self.dcbaa.address());
         registers.write_op(CONFIG, max_slots & 0xff);
 
-        // Event ring segment table: one segment of `RING_TRBS` TRBs.
         self.erst
             .write_slot(
                 0,
@@ -394,7 +396,6 @@ impl Controller {
         registers.write_rt64(ERSTBA, self.erst.address());
         registers.write_rt64(ERDP, self.event_ring.address());
 
-        // Command ring: the last TRB links back to the first.
         self.command_ring.link_to_start();
         registers.write_op64(CRCR, self.command_ring.address() | 1);
         Ok(())
