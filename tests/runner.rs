@@ -106,6 +106,22 @@ extern "efiapi" fn efi_main(
             paging::unmapping_page_zero_leaves_it_not_mapped,
         ),
         (
+            "pat_bit_in_a_leaf_entry_is_not_a_huge_page",
+            paging::pat_bit_in_a_leaf_entry_is_not_a_huge_page,
+        ),
+        (
+            "identity_map_uses_2m_pages",
+            paging::identity_map_uses_2m_pages,
+        ),
+        (
+            "unmapping_a_page_splits_the_huge_page_around_it",
+            paging::unmapping_a_page_splits_the_huge_page_around_it,
+        ),
+        (
+            "mapping_one_page_splits_the_huge_page",
+            paging::mapping_one_page_splits_the_huge_page,
+        ),
+        (
             "executor_runs_every_task_to_completion",
             executor::executor_runs_every_task_to_completion,
         ),

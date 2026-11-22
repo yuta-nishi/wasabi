@@ -120,11 +120,15 @@ pub fn init_paging(memory_map: &MemoryMapHolder) -> PageTables {
             end = end.max(e.physical_start() + e.number_of_pages() * PAGE_SIZE);
         }
     }
+    let started = timer::nanoseconds();
     let mut tables = PageTables::identity_map(end);
+    let elapsed_ms = (timer::nanoseconds() - started) / 1_000_000;
     // Leaving page 0 unmapped turns a null pointer dereference into a page
     // fault instead of a silent read of address zero.
     tables.unmap_page(0);
-    info!("paging: identity-mapped {PAGE_SIZE:#x}..{end:#x}, page 0 is unmapped");
+    info!(
+        "paging: identity-mapped {PAGE_SIZE:#x}..{end:#x} in {elapsed_ms} ms, page 0 is unmapped"
+    );
     tables
 }
 

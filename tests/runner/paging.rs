@@ -86,3 +86,66 @@ pub fn unmapping_page_zero_leaves_it_not_mapped() {
         other => panic!("page 0x1000: {other:?}"),
     }
 }
+
+/// A PT entry whose bit 7 is set carries the PAT bit there, not a huge page.
+pub fn pat_bit_in_a_leaf_entry_is_not_a_huge_page() {
+    let mut pt = Table::zeroed();
+    pt.entries_mut()[0] = Entry::from_raw(0x5000 | 1 | 2 | (1 << 7));
+    let mut pd = Table::zeroed();
+    pd.entries_mut()[0] = pointer(&pt);
+    let mut pdpt = Table::zeroed();
+    pdpt.entries_mut()[0] = pointer(&pd);
+    let mut pml4 = Table::zeroed();
+    pml4.entries_mut()[0] = pointer(&pdpt);
+
+    match translate_in(pml4.entries(), 0x234) {
+        Translation::Page(_, physical) => assert_eq!(physical, 0x5234),
+        other => panic!("expected a 4 KiB page, got {other:?}"),
+    }
+}
+
+pub fn identity_map_uses_2m_pages() {
+    let tables = PageTables::identity_map(0x40_0000);
+
+    match translate_in(tables.root(), 0x12_3456) {
+        Translation::Huge(steps, physical) => {
+            assert_eq!(steps.len(), 3);
+            assert_eq!(physical, 0x12_3456);
+        }
+        other => panic!("expected a 2 MiB page, got {other:?}"),
+    }
+}
+
+pub fn unmapping_a_page_splits_the_huge_page_around_it() {
+    let mut tables = PageTables::identity_map(0x40_0000);
+    tables.unmap_page(0x2000);
+
+    match translate_in(tables.root(), 0x2000) {
+        Translation::NotMapped(_) => {}
+        other => panic!("expected the page to be unmapped, got {other:?}"),
+    }
+    // Its neighbours come from the table the split created.
+    match translate_in(tables.root(), 0x3000) {
+        Translation::Page(_, physical) => assert_eq!(physical, 0x3000),
+        other => panic!("expected a 4 KiB page after the split, got {other:?}"),
+    }
+    // The next 2 MiB page was not touched.
+    match translate_in(tables.root(), 0x30_0000) {
+        Translation::Huge(_, _) => {}
+        other => panic!("expected the second 2 MiB page to stay huge, got {other:?}"),
+    }
+}
+
+pub fn mapping_one_page_splits_the_huge_page() {
+    let mut tables = PageTables::identity_map(0x20_0000);
+    tables.map_page(0x2000, 0x9_2000);
+
+    match translate_in(tables.root(), 0x2000) {
+        Translation::Page(_, physical) => assert_eq!(physical, 0x9_2000),
+        other => panic!("expected the remapped page to move, got {other:?}"),
+    }
+    match translate_in(tables.root(), 0x1234) {
+        Translation::Page(_, physical) => assert_eq!(physical, 0x1234),
+        other => panic!("expected the neighbour to stay a 4 KiB page, got {other:?}"),
+    }
+}
