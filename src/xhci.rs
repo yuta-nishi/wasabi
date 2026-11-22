@@ -11,6 +11,7 @@ use crate::timer;
 const CAPLENGTH: usize = 0x00;
 const HCSPARAMS1: usize = 0x04;
 const HCSPARAMS2: usize = 0x08;
+const HCCPARAMS1: usize = 0x10;
 const DBOFF: usize = 0x14;
 const RTSOFF: usize = 0x18;
 
@@ -43,6 +44,16 @@ const PORTSC_CHANGES: u32 = PORTSC_CONNECT_CHANGED
 
 /// `Enable Slot` (TRB type 9): the controller picks a slot for a device.
 const TRB_ENABLE_SLOT: u32 = 9;
+/// `Address Device` (TRB type 11): the controller gives the device an address
+/// and allocates the endpoints its input context describes.
+const TRB_ADDRESS_DEVICE: u32 = 11;
+
+/// 32-byte contexts: one slot context, one endpoint context per endpoint.
+const CONTEXT_SIZE: usize = 0x20;
+/// Words in a page of contexts.
+const CONTEXT_WORDS: usize = 1024;
+/// `HCCPARAMS1`: context size, 0 for 32 bytes and 1 for 64.
+const HCC_CONTEXT_SIZE: u32 = 1 << 2;
 
 /// Runtime registers of interrupter 0, relative to `RTSOFF`.
 const INTERRUPTER0: usize = 0x20;
@@ -111,6 +122,15 @@ impl Trb {
         }
     }
 
+    /// `Address Device`: the input context at `input` describes the device.
+    fn address_device(input: u64, slot: u32, cycle: bool) -> Self {
+        Self {
+            parameter: input,
+            status: 0,
+            control: (TRB_ADDRESS_DEVICE << 10) | (slot << 24) | u32::from(cycle),
+        }
+    }
+
     /// `Enable Slot`: the controller answers with the slot it picked.
     fn enable_slot(cycle: bool, slot_type: u32) -> Self {
         Self {
@@ -141,9 +161,6 @@ struct ErstEntry {
 
 // SAFETY: a segment table entry is two integers and a reserved word.
 unsafe impl Zeroable for ErstEntry {}
-
-// SAFETY: a byte has no invalid bit pattern.
-unsafe impl Zeroable for [u8; 4096] {}
 
 /// The four register groups of a host controller's window.
 ///
@@ -331,6 +348,18 @@ type Scratchpad = (
     alloc::vec::Vec<IoBox<[u8; 4096]>>,
 );
 
+/// A device the controller has given an address to.
+struct Device {
+    slot: u32,
+    port: u32,
+    /// The endpoint 0 ring: control transfers go through it.
+    ep0: Ring<RING_TRBS>,
+    /// Where the controller keeps the device's contexts.
+    _context: IoBox<[u32; CONTEXT_WORDS]>,
+    /// The input context the device was addressed with.
+    _input: IoBox<[u32; CONTEXT_WORDS]>,
+}
+
 /// An xHCI host controller that has been reset, given rings, and started.
 pub struct HostController {
     registers: Registers,
@@ -340,6 +369,7 @@ pub struct HostController {
     erst: IoBox<[ErstEntry; 1]>,
     dcbaa: IoBox<[u64; MAX_SLOTS]>,
     _scratchpad: Option<Scratchpad>,
+    devices: alloc::vec::Vec<Device>,
 }
 
 impl HostController {
@@ -351,6 +381,9 @@ impl HostController {
         let max_interrupters = (hcsparams1 >> 8) & 0x7ff;
         let max_ports = (hcsparams1 >> 24) & 0xff;
         let scratchpad = scratchpad_count(registers.read_cap(HCSPARAMS2));
+        if registers.read_cap(HCCPARAMS1) & HCC_CONTEXT_SIZE != 0 {
+            return Err("this driver only supports 32-byte contexts");
+        }
         info!(
             "xhci: {max_slots} slots, {max_interrupters} interrupters, {max_ports} ports, \
              {scratchpad} scratchpad buffers"
@@ -375,6 +408,7 @@ impl HostController {
             erst: IoBox::new(tables),
             dcbaa: IoBox::new(tables),
             _scratchpad: None,
+            devices: alloc::vec::Vec::new(),
         };
         controller.register_rings(tables, max_slots, scratchpad)?;
         controller.start()?;
@@ -482,9 +516,100 @@ impl HostController {
         }
     }
 
+    /// The protocol speed ID of a port (`PORTSC` bits 13..10).
+    fn port_speed(&self, port: u32) -> Result<u32> {
+        let speed = (self.registers.port_status(port).read() >> 10) & 0xf;
+        if (1..=4).contains(&speed) {
+            Ok(speed)
+        } else {
+            Err("the port reports an unknown speed")
+        }
+    }
+
+    /// The largest packet a control endpoint may use at that speed.
+    fn max_packet_size(speed: u32) -> Result<u16> {
+        match speed {
+            1 | 2 => Ok(8),
+            3 => Ok(64),
+            4 => Ok(512),
+            _ => Err("the port reports an unknown speed"),
+        }
+    }
+
+    /// Gives the device on `port` an address: the input context describes the
+    /// slot and endpoint 0, and the controller fills in the device context.
+    fn address_device(
+        &mut self,
+        tables: &mut PageTables,
+        slot: u32,
+        port: u32,
+    ) -> Result<()> {
+        let speed = self.port_speed(port)?;
+        let max_packet = Self::max_packet_size(speed)?;
+        let ep0 = Ring::<RING_TRBS>::new(tables);
+        let mut input = IoBox::<[u32; CONTEXT_WORDS]>::new(tables);
+        let context = IoBox::<[u32; CONTEXT_WORDS]>::new(tables);
+
+        // Input control context: A0 adds the slot context, A1 endpoint 0.
+        input
+            .write_slot(1, 0b11)
+            .ok_or("the input context is too small")?;
+        let slot_context = CONTEXT_SIZE / 4;
+        // Slot context: speed, one context entry, root hub port number.
+        input
+            .write_slot(slot_context, (speed << 20) | (1 << 27))
+            .ok_or("the input context is too small")?;
+        input
+            .write_slot(slot_context + 1, port << 16)
+            .ok_or("the input context is too small")?;
+        // Endpoint 0 context: control, three retries, max packet, its ring.
+        let ep0_context = 2 * slot_context;
+        input
+            .write_slot(
+                ep0_context + 1,
+                (u32::from(max_packet) << 16) | (4 << 3) | (3 << 1),
+            )
+            .ok_or("the input context is too small")?;
+        input
+            .write_slot(ep0_context + 2, (ep0.address() as u32 & !0xf) | 1)
+            .ok_or("the input context is too small")?;
+        input
+            .write_slot(ep0_context + 3, (ep0.address() >> 32) as u32)
+            .ok_or("the input context is too small")?;
+        // Control endpoints use an average TRB length of 8.
+        input
+            .write_slot(ep0_context + 4, 8)
+            .ok_or("the input context is too small")?;
+        self.dcbaa
+            .write_slot(slot as usize, context.address())
+            .ok_or("the device context array is full")?;
+
+        let trb = Trb::address_device(input.address(), slot, self.command_ring.cycle);
+        self.command(trb)?;
+        let event = self.wait_for_completion()?;
+        if completion_code(&event) != COMPLETION_SUCCESS {
+            return Err("the address device command failed");
+        }
+        // The controller fills in the device context: the slot context's last
+        // word carries the address it assigned and the slot's state.
+        let slot_status = context.read_slot(11).unwrap_or(0);
+        info!(
+            "xhci: slot {slot} has device address {}",
+            slot_status & 0xff
+        );
+        self.devices.push(Device {
+            slot,
+            port,
+            ep0,
+            _context: context,
+            _input: input,
+        });
+        Ok(())
+    }
+
     /// Finds connected devices, resets their ports, and lets the controller pick
     /// a slot for each.
-    pub fn enumerate_ports(&mut self) -> Result<()> {
+    pub fn enumerate_ports(&mut self, tables: &mut PageTables) -> Result<()> {
         for port in 1..=self.max_ports {
             let status = self.registers.port_status(port).read();
             if status & PORTSC_CONNECTED == 0 {
@@ -499,6 +624,15 @@ impl HostController {
             // Slot type 0 is a USB2 device; a SuperSpeed port asks for type 1.
             let slot = self.enable_slot(0)?;
             info!("xhci: port {port} reset (portsc {after:#010x}), slot {slot} assigned");
+            self.address_device(tables, slot, port)?;
+        }
+        for device in &self.devices {
+            info!(
+                "xhci: slot {} on port {} addressed, endpoint 0 ring at {:#018x}",
+                device.slot,
+                device.port,
+                device.ep0.address()
+            );
         }
         Ok(())
     }

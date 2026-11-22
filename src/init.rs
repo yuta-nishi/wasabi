@@ -97,7 +97,7 @@ pub fn init_pci(
 pub fn init_xhci(registers: Registers, tables: &mut PageTables) -> Result<()> {
     let mut host = HostController::init(registers, tables)?;
     info!("xhci: version {:#06x}", host.version());
-    host.enumerate_ports()?;
+    host.enumerate_ports(tables)?;
     Ok(())
 }
 

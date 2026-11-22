@@ -14,6 +14,10 @@ use core::pin::Pin;
 pub unsafe trait Zeroable: Sized {}
 
 // SAFETY: integers have no invalid bit pattern.
+unsafe impl Zeroable for u8 {}
+// SAFETY: as above.
+unsafe impl Zeroable for u32 {}
+// SAFETY: as above.
 unsafe impl Zeroable for u64 {}
 // SAFETY: an array is zeroable when its element is, since every element is.
 unsafe impl<T: Zeroable, const N: usize> Zeroable for [T; N] {}
