@@ -4,6 +4,10 @@
 //! `MCFG` ACPI table says where that window starts and which buses it covers.
 //! Reading a register is therefore an ordinary memory read at
 //! `base + (bus << 20 | device << 15 | function << 12) + offset`.
+//!
+//! The layouts follow the PCI Express base specification and the PCI Firmware
+//! specification (which defines `MCFG`):
+//! <https://pcisig.com/specifications>
 
 use crate::acpi::Mcfg;
 use crate::acpi::Rsdp;

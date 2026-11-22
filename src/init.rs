@@ -96,8 +96,8 @@ pub fn init_pci(
 
 /// Resets the xHCI controller, gives it its rings, starts it, and proves the
 /// command path with a no-op command.
-pub fn init_xhci(registers: Registers) -> Result<()> {
-    let controller = Controller::init(registers)?;
+pub fn init_xhci(registers: Registers, tables: &mut PageTables) -> Result<()> {
+    let controller = Controller::init(registers, tables)?;
     info!("xhci: version {:#06x}", controller.version());
     Ok(())
 }

@@ -63,7 +63,7 @@ extern "efiapi" fn efi_main(
 
     let registers =
         init_pci(efi_system_table, &mut tables).expect("listing the PCI devices failed");
-    init_xhci(registers).expect("initializing the xHCI controller failed");
+    init_xhci(registers, &mut tables).expect("initializing the xHCI controller failed");
 
     init_interrupts(1_000).expect("initializing the timer interrupt failed");
 

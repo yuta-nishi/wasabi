@@ -53,7 +53,6 @@ fn spawn_serial_console() {
                         let text = core::str::from_utf8(text).unwrap_or("<not utf-8>");
                         info!("input: \"{text}\"");
                     }
-                    // An empty Enter still deserves a newline of its own.
                     None if byte == b'\r' || byte == b'\n' => println!(),
                     None => {}
                 }
