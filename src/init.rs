@@ -55,9 +55,7 @@ pub fn init_pci(
         .acpi_rsdp()
         .ok_or("the firmware has no ACPI table")?;
     let pci = ConfigSpace::from_acpi(rsdp)?;
-    pci.probe();
-
-    let xhci = pci.find_xhci().ok_or("no xHCI controller on the PCI bus")?;
+    let xhci = pci.probe().ok_or("no xHCI controller on the PCI bus")?;
     let Some(Bar::Memory {
         address,
         size,

@@ -231,24 +231,17 @@ impl ConfigSpace {
         })
     }
 
-    /// The first xHCI controller: class `0c.03` (USB) with programming
-    /// interface `0x30`. The interface byte is what separates xHCI from the
-    /// older EHCI (`0x20`), OHCI (`0x10`) and UHCI (`0x00`) controllers.
-    pub fn find_xhci(&self) -> Option<Address> {
-        self.addresses().find(|address| {
-            self.vendor_and_device(*address).is_some()
-                && self.class(*address) == (0x0c, 0x03)
-                && self.programming_interface(*address) == 0x30
-        })
-    }
-
-    /// Logs every function that answers in this window.
-    pub fn probe(&self) {
+    /// Logs every function that answers in this window, and returns the first
+    /// xHCI controller on the way: class `0c.03` (USB) with programming
+    /// interface `0x30`, the byte that separates xHCI from the older EHCI
+    /// (`0x20`), OHCI (`0x10`) and UHCI (`0x00`) controllers.
+    pub fn probe(&self) -> Option<Address> {
         info!(
             "pci: ECAM at {:#018x} covering buses {:#04x}..={:#04x}",
             self.base, self.start_bus, self.end_bus
         );
         let mut found = 0;
+        let mut xhci = None;
         for address in self.addresses() {
             let Some((vendor, device)) = self.vendor_and_device(address) else {
                 continue;
@@ -258,7 +251,14 @@ impl ConfigSpace {
                 "pci: {address} {vendor:04x}:{device:04x} class {class:02x}.{subclass:02x}"
             );
             found += 1;
+            if xhci.is_none()
+                && (class, subclass) == (0x0c, 0x03)
+                && self.programming_interface(address) == 0x30
+            {
+                xhci = Some(address);
+            }
         }
         info!("pci: {found} functions found");
+        xhci
     }
 }
