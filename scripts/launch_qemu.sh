@@ -12,9 +12,11 @@ set +e
 qemu-system-x86_64 \
   -m 4G \
   -bios third_party/ovmf/RELEASEX64_OVMF.fd \
+  -machine q35 \
   -drive format=raw,file=fat:rw:mnt \
   -device isa-debug-exit,iobase=0xf4,iosize=0x01 \
   -no-reboot \
+  -monitor telnet:127.0.0.1:2345,server,nowait \
   -serial stdio \
   "$@"
 RETCODE=$?
