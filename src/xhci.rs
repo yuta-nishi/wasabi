@@ -10,13 +10,11 @@
 //! the controller writes events into the event ring.
 
 use crate::iobox::IoBox;
-use crate::iobox::allocate_uncached;
 use crate::mmio::Mmio;
+use crate::mmio::Window;
 use crate::paging::PageTables;
 use crate::result::Result;
 use crate::timer;
-use core::ptr::read_volatile;
-use core::ptr::write_volatile;
 
 /// Generic capability register offsets.
 const CAPLENGTH: usize = 0x00;
@@ -48,6 +46,10 @@ const USBSTS_NOT_READY: u32 = 1 << 11;
 const TIMEOUT_MS: u64 = 100;
 /// TRBs in the command ring and in the event ring segment.
 const RING_TRBS: usize = 256;
+/// Most device slots the controller may report (`MaxSlots` is one byte).
+const MAX_SLOTS: usize = 256;
+/// Most scratchpad buffers the controller may report (the count is ten bits).
+const MAX_SCRATCHPAD: usize = 1023;
 
 /// A transfer request block: 16 bytes the controller and the driver hand to each
 /// other through a ring.
@@ -59,6 +61,9 @@ struct Trb {
     dword2: u32,
     dword3: u32,
 }
+
+// SAFETY: a TRB is four integers, so every bit pattern is valid.
+unsafe impl crate::iobox::Zeroable for Trb {}
 
 /// `No Op Command` (TRB type 23; type 8 is the transfer-ring `No Op`): the
 /// controller completes it without doing anything, which makes it a check that
@@ -108,9 +113,15 @@ struct ErstEntry {
     _reserved: u32,
 }
 
+// SAFETY: a segment table entry is two integers and a reserved word.
+unsafe impl crate::iobox::Zeroable for ErstEntry {}
+
+// SAFETY: a byte has no invalid bit pattern.
+unsafe impl crate::iobox::Zeroable for [u8; 4096] {}
+
 /// The four register groups, as addresses inside the controller's window.
 pub struct Registers {
-    window: u64,
+    window: Window,
     caplength: u64,
     rtsoff: u64,
     dboff: u64,
@@ -119,15 +130,15 @@ pub struct Registers {
 impl Registers {
     /// Locates the register groups; the window itself must already be mapped.
     pub fn new(window: u64) -> Result<Self> {
-        // SAFETY: `window` is the controller's register window, mapped by the
-        // caller; the offsets come from the controller's own registers.
-        let caplength =
-            u64::from(unsafe { Mmio::<u8>::at(window + CAPLENGTH as u64) }.read());
+        // SAFETY: `window` is the controller's register window, mapped uncached
+        // by the caller.
+        let window = unsafe { Window::new(window) };
+        let caplength = u64::from(window.at::<u8>(CAPLENGTH).read());
         if caplength == 0 {
             return Err("the xHCI controller reports a zero CAPLENGTH");
         }
-        let dboff = u64::from(unsafe { Mmio::<u32>::at(window + DBOFF as u64) }.read());
-        let rtsoff = u64::from(unsafe { Mmio::<u32>::at(window + RTSOFF as u64) }.read());
+        let dboff = u64::from(window.at::<u32>(DBOFF).read());
+        let rtsoff = u64::from(window.at::<u32>(RTSOFF).read());
         Ok(Self {
             window,
             caplength,
@@ -138,28 +149,22 @@ impl Registers {
 
     /// One of the capability registers, `offset` bytes into the window.
     fn capability<T: Copy>(&self, offset: usize) -> Mmio<T> {
-        // SAFETY: the window is device memory and `offset` stays inside it.
-        unsafe { Mmio::at(self.window + offset as u64) }
+        self.window.at(offset)
     }
 
     /// One of the operational registers, relative to `CAPLENGTH`.
     fn operational<T: Copy>(&self, offset: usize) -> Mmio<T> {
-        // SAFETY: as above; `CAPLENGTH` was read from the controller.
-        unsafe { Mmio::at(self.window + self.caplength + offset as u64) }
+        self.window.at(self.caplength as usize + offset)
     }
 
     /// One of interrupter 0's runtime registers, relative to `RTSOFF`.
     fn runtime<T: Copy>(&self, offset: usize) -> Mmio<T> {
-        // SAFETY: as above; `RTSOFF` was read from the controller.
-        unsafe {
-            Mmio::at(self.window + self.rtsoff + INTERRUPTER0 as u64 + offset as u64)
-        }
+        self.window.at(self.rtsoff as usize + INTERRUPTER0 + offset)
     }
 
     /// One entry of the doorbell array, relative to `DBOFF`.
     fn doorbell(&self, slot: u32) -> Mmio<u32> {
-        // SAFETY: as above; `DBOFF` was read from the controller.
-        unsafe { Mmio::at(self.window + self.dboff + u64::from(slot) * 4) }
+        self.window.at(self.dboff as usize + slot as usize * 4)
     }
 
     /// The version the controller reports, in BCD (`0x0100` is 1.0).
@@ -221,17 +226,83 @@ impl Registers {
     }
 }
 
+/// A ring of TRBs that the controller walks at its own pace.
+///
+/// The driver writes entries at `index`; the cycle bit on each entry marks the
+/// lap it belongs to, so both sides can tell a fresh entry from one left over
+/// from an earlier lap.
+struct Ring<const N: usize> {
+    entries: IoBox<[Trb; N]>,
+    index: usize,
+    cycle: bool,
+}
+
+impl<const N: usize> Ring<N> {
+    fn new(tables: &mut PageTables) -> Self {
+        Self {
+            entries: IoBox::new(tables),
+            index: 0,
+            cycle: true,
+        }
+    }
+
+    fn address(&self) -> u64 {
+        self.entries.address()
+    }
+
+    /// Where the next entry sits, in bytes from the ring's address.
+    fn offset(&self) -> u64 {
+        (self.index * core::mem::size_of::<Trb>()) as u64
+    }
+
+    /// Hands over one entry. The last slot is the link, so `N - 1` are usable and
+    /// a ring that fills up needs a lap the driver cannot start yet.
+    fn push(&mut self, trb: Trb) -> Result<()> {
+        if self.index + 1 >= N {
+            return Err("the command ring is full");
+        }
+        self.entries
+            .write_slot(self.index, trb)
+            .ok_or("the command ring is full")?;
+        self.index += 1;
+        Ok(())
+    }
+
+    /// The next entry whose cycle bit says it belongs to this lap.
+    fn take(&mut self) -> Option<Trb> {
+        let entry = self.entries.read_slot(self.index)?;
+        if (entry.dword3 & 1 != 0) != self.cycle {
+            return None;
+        }
+        self.index += 1;
+        if self.index == N {
+            self.index = 0;
+            self.cycle = !self.cycle;
+        }
+        Some(entry)
+    }
+
+    /// Points the last slot back at the first, closing the ring.
+    fn link_to_start(&mut self) {
+        let link = Trb::link(self.entries.address(), self.cycle);
+        self.entries.write_slot(N - 1, link);
+    }
+}
+
+/// The scratchpad buffers: the array of their addresses, and the pages it names.
+type Scratchpad = (
+    IoBox<[u64; MAX_SCRATCHPAD]>,
+    alloc::vec::Vec<IoBox<[u8; 4096]>>,
+);
+
 /// A controller that has been reset, given rings, and started.
 pub struct Controller {
     registers: Registers,
-    command_ring: IoBox<[Trb; RING_TRBS]>,
-    command_index: usize,
-    command_cycle: bool,
-    event_ring: IoBox<[Trb; RING_TRBS]>,
-    event_index: usize,
-    event_cycle: bool,
-    _erst: IoBox<[ErstEntry; 1]>,
-    _dcbaa: u64,
+    command_ring: Ring<RING_TRBS>,
+    event_ring: Ring<RING_TRBS>,
+    erst: IoBox<[ErstEntry; 1]>,
+    dcbaa: IoBox<[u64; MAX_SLOTS]>,
+    _scratchpad: Option<Scratchpad>,
 }
 
 impl Controller {
@@ -259,22 +330,13 @@ impl Controller {
         // 4 KiB pages: the only size this OS allocates.
         registers.write_op(PAGESIZE, 1);
 
-        // SAFETY: an all-zero TRB is a valid, unused block.
-        let command_ring = unsafe { IoBox::<[Trb; RING_TRBS]>::new(tables) };
-        // SAFETY: as above.
-        let event_ring = unsafe { IoBox::<[Trb; RING_TRBS]>::new(tables) };
-        // SAFETY: an all-zero segment table entry describes nothing yet.
-        let erst = unsafe { IoBox::<[ErstEntry; 1]>::new(tables) };
         let mut controller = Self {
             registers,
-            command_ring,
-            command_index: 0,
-            command_cycle: true,
-            event_ring,
-            event_index: 0,
-            event_cycle: true,
-            _erst: erst,
-            _dcbaa: 0,
+            command_ring: Ring::new(tables),
+            event_ring: Ring::new(tables),
+            erst: IoBox::new(tables),
+            dcbaa: IoBox::new(tables),
+            _scratchpad: None,
         };
         controller.register_rings(tables, max_slots, scratchpad)?;
         controller.start()?;
@@ -289,54 +351,53 @@ impl Controller {
         max_slots: u32,
         scratchpad: u32,
     ) -> Result<()> {
+        if max_slots as usize >= MAX_SLOTS {
+            return Err("the controller has more slots than this driver supports");
+        }
+        if scratchpad as usize > MAX_SCRATCHPAD {
+            return Err("the controller wants more scratchpad buffers than supported");
+        }
         let registers = &self.registers;
 
-        // Device context array: one entry per slot, plus the scratchpad pointer.
-        let dcbaa_entries = max_slots as usize + 1;
-        let dcbaa = allocate_uncached(tables, dcbaa_entries * 8)?;
         if scratchpad > 0 {
-            // The first entry points at an array of scratchpad buffers, which the
-            // controller uses when it needs a scratch area of its own.
-            let buffers = allocate_uncached(tables, scratchpad as usize * 8)? as *mut u64;
+            // Entry 0 of the device context array points at an array of
+            // scratchpad buffers, which the controller uses for its own work.
+            let mut buffers = IoBox::<[u64; MAX_SCRATCHPAD]>::new(tables);
+            let mut pages = alloc::vec::Vec::new();
             for index in 0..scratchpad as usize {
-                let buffer = allocate_uncached(tables, 4096)?;
-                // SAFETY: `index` is inside the array just allocated.
-                unsafe { write_volatile(buffers.add(index), buffer) };
+                let page = IoBox::<[u8; 4096]>::new(tables);
+                buffers
+                    .write_slot(index, page.address())
+                    .ok_or("the scratchpad array is full")?;
+                pages.push(page);
             }
-            // SAFETY: entry 0 exists, since `dcbaa_entries` is at least 1.
-            unsafe { write_volatile(dcbaa as *mut u64, buffers as u64) };
+            self.dcbaa
+                .write_slot(0, buffers.address())
+                .ok_or("the device context array is full")?;
+            self._scratchpad = Some((buffers, pages));
         }
-        self._dcbaa = dcbaa;
-        registers.write_op64(DCBAAP, dcbaa);
+        registers.write_op64(DCBAAP, self.dcbaa.address());
         registers.write_op(CONFIG, max_slots & 0xff);
 
         // Event ring segment table: one segment of `RING_TRBS` TRBs.
-        // SAFETY: the table holds exactly one entry and nothing else reads it.
-        unsafe {
-            *self._erst.as_mut() = [ErstEntry {
-                base: self.event_ring.address(),
-                size: RING_TRBS as u32,
-                _reserved: 0,
-            }]
-        };
+        self.erst
+            .write_slot(
+                0,
+                ErstEntry {
+                    base: self.event_ring.address(),
+                    size: RING_TRBS as u32,
+                    _reserved: 0,
+                },
+            )
+            .ok_or("the segment table has no room")?;
         registers.write_rt(ERSTSZ, 1);
-        registers.write_rt64(ERSTBA, self._erst.address());
+        registers.write_rt64(ERSTBA, self.erst.address());
         registers.write_rt64(ERDP, self.event_ring.address());
 
         // Command ring: the last TRB links back to the first.
-        let link = Trb::link(self.command_ring.address(), true);
-        // SAFETY: the ring has `RING_TRBS` slots and the link goes in the last.
-        unsafe { write_volatile(self.command_ring_ptr().add(RING_TRBS - 1), link) };
+        self.command_ring.link_to_start();
         registers.write_op64(CRCR, self.command_ring.address() | 1);
         Ok(())
-    }
-
-    fn command_ring_ptr(&self) -> *mut Trb {
-        self.command_ring.address() as *mut Trb
-    }
-
-    fn event_ring_ptr(&self) -> *mut Trb {
-        self.event_ring.address() as *mut Trb
     }
 
     fn start(&mut self) -> Result<()> {
@@ -345,11 +406,16 @@ impl Controller {
         registers.wait_status_clear(USBSTS_HALTED)
     }
 
+    /// The version the controller reports, in BCD.
+    pub fn version(&self) -> u16 {
+        self.registers.version()
+    }
+
     /// Sends a no-op command and waits for its completion event: if that arrives,
     /// the doorbell, the command ring, the event ring and the completion path all
     /// work.
     fn check_with_no_op(&mut self) -> Result<()> {
-        self.command(Trb::no_op_command(self.command_cycle))?;
+        self.command(Trb::no_op_command(self.command_ring.cycle))?;
         let event = self.next_event()?;
         if trb_type(&event) != TRB_COMMAND_COMPLETION {
             return Err("the xHCI controller sent an unexpected event");
@@ -362,19 +428,9 @@ impl Controller {
         Ok(())
     }
 
-    /// The version the controller reports, in BCD.
-    pub fn version(&self) -> u16 {
-        self.registers.version()
-    }
-
     /// Hands one command TRB to the controller.
     fn command(&mut self, trb: Trb) -> Result<()> {
-        if self.command_index == RING_TRBS - 1 {
-            return Err("the command ring needs a lap it cannot do yet");
-        }
-        // SAFETY: `command_index` is below the link entry at the end.
-        unsafe { write_volatile(self.command_ring_ptr().add(self.command_index), trb) };
-        self.command_index += 1;
+        self.command_ring.push(trb)?;
         self.registers.ring_doorbell(0, 0);
         Ok(())
     }
@@ -383,20 +439,11 @@ impl Controller {
     fn next_event(&mut self) -> Result<Trb> {
         let deadline = timer::nanoseconds() + TIMEOUT_MS * 1_000_000;
         loop {
-            // SAFETY: `event_index` is inside the ring segment.
-            let event =
-                unsafe { read_volatile(self.event_ring_ptr().add(self.event_index)) };
-            if (event.dword3 & 1 != 0) == self.event_cycle {
-                self.event_index += 1;
-                if self.event_index == RING_TRBS {
-                    self.event_index = 0;
-                    self.event_cycle = !self.event_cycle;
-                }
-                // Tell the controller how far the driver has read.
-                self.registers.write_rt64(
-                    ERDP,
-                    self.event_ring.address() + (self.event_index * 16) as u64,
-                );
+            if let Some(event) = self.event_ring.take() {
+                // Tell the controller how far the driver has read; the address is
+                // 16-byte aligned, so this also clears the busy bit.
+                let dequeue = self.event_ring.address() + self.event_ring.offset();
+                self.registers.write_rt64(ERDP, dequeue);
                 return Ok(event);
             }
             if timer::nanoseconds() >= deadline {

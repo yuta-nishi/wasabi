@@ -41,6 +41,32 @@ impl<T: Copy> Mmio<T> {
     }
 }
 
+/// A device's register window: where its registers start.
+///
+/// Creating one is the only unsafe step; everything inside is an offset from
+/// that address, so the offsets cannot accidentally point somewhere else.
+pub struct Window {
+    base: u64,
+}
+
+impl Window {
+    /// # Safety
+    ///
+    /// `base` must be the start of a device register window that is mapped and
+    /// not cached.
+    pub const unsafe fn new(base: u64) -> Self {
+        Self { base }
+    }
+
+    /// The register `offset` bytes into the window.
+    pub fn at<T: Copy>(&self, offset: usize) -> Mmio<T> {
+        // SAFETY: the window was validated when it was created, and `offset`
+        // stays inside it as long as callers use the offsets the device
+        // documents.
+        unsafe { Mmio::at(self.base + offset as u64) }
+    }
+}
+
 impl<T: Copy> Clone for Mmio<T> {
     fn clone(&self) -> Self {
         *self

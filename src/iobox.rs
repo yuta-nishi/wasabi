@@ -7,12 +7,23 @@
 
 use crate::paging::PAGE_SIZE;
 use crate::paging::PageTables;
-use crate::result::Result;
-use alloc::alloc::Layout;
 use alloc::boxed::Box;
 use core::marker::PhantomPinned;
 use core::mem::MaybeUninit;
 use core::pin::Pin;
+
+/// Types whose all-zero bit pattern is a valid value.
+///
+/// # Safety
+///
+/// `T` must accept every bit zero: no non-zero discriminant, no dangling
+/// reference, no `bool` that could be neither 0 nor 1.
+pub unsafe trait Zeroable: Sized {}
+
+// SAFETY: integers have no invalid bit pattern.
+unsafe impl Zeroable for u64 {}
+// SAFETY: an array is zeroable when its element is, since every element is.
+unsafe impl<T: Zeroable, const N: usize> Zeroable for [T; N] {}
 
 /// A page-aligned structure whose address the device can be given.
 ///
@@ -27,16 +38,11 @@ struct IoBoxInner<T: Sized> {
     _pinned: PhantomPinned,
 }
 
-impl<T: Sized> IoBox<T> {
+impl<T: Zeroable> IoBox<T> {
     /// Allocates zeroed, page-aligned memory for `T` and maps it uncached.
-    ///
-    /// # Safety
-    ///
-    /// All zeros must be a valid `T`: the controller reads this memory before
-    /// the driver has written all of it.
-    pub unsafe fn new(tables: &mut PageTables) -> Self {
+    pub fn new(tables: &mut PageTables) -> Self {
         let inner = Box::pin(IoBoxInner {
-            // SAFETY: the caller promises that all zeros is a valid `T`.
+            // SAFETY: `Zeroable` promises that all zeros is a valid `T`.
             data: unsafe { MaybeUninit::<T>::zeroed().assume_init() },
             _pinned: PhantomPinned,
         });
@@ -66,19 +72,25 @@ impl<T: Sized> IoBox<T> {
     }
 }
 
-/// Page-aligned, zeroed, uncached memory of `size` bytes, returned as an address
-/// for structures whose size is only known at run time.
-pub fn allocate_uncached(tables: &mut PageTables, size: usize) -> Result<u64> {
-    let page = PAGE_SIZE as usize;
-    let size = size.max(page).div_ceil(page) * page;
-    let layout = Layout::from_size_align(size, PAGE_SIZE as usize)
-        .map_err(|_| "bad allocation layout")?;
-    // SAFETY: the layout has a non-zero size, which `alloc_zeroed` requires.
-    let pointer = unsafe { alloc::alloc::alloc_zeroed(layout) };
-    if pointer.is_null() {
-        return Err("out of memory for a device structure");
+impl<T: Zeroable + Copy, const N: usize> IoBox<[T; N]> {
+    /// One element, read through a volatile load.
+    pub fn read_slot(&self, index: usize) -> Option<T> {
+        if index >= N {
+            return None;
+        }
+        // SAFETY: `index` was bounds checked against the array length.
+        Some(unsafe { core::ptr::read_volatile((self.address() as *const T).add(index)) })
     }
-    let address = pointer as u64;
-    tables.map_range_uncached(address, size as u64);
-    Ok(address)
+
+    /// One element, written through a volatile store.
+    pub fn write_slot(&mut self, index: usize, value: T) -> Option<()> {
+        if index >= N {
+            return None;
+        }
+        // SAFETY: as in `read_slot`.
+        unsafe {
+            core::ptr::write_volatile((self.address() as *mut T).add(index), value)
+        };
+        Some(())
+    }
 }
