@@ -55,12 +55,12 @@ extern "efiapi" fn efi_main(
 
     init_timer(efi_system_table).expect("initializing the timer failed");
 
-    let tables = init_paging(&memory_map);
+    let mut tables = init_paging(&memory_map);
     tables.switch();
     info!("paging: switched to our own tables");
     paging::dump_root();
 
-    init_pci(efi_system_table).expect("listing the PCI devices failed");
+    init_pci(efi_system_table, &mut tables).expect("listing the PCI devices failed");
 
     init_interrupts(1_000).expect("initializing the timer interrupt failed");
 
