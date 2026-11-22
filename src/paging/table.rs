@@ -16,6 +16,11 @@ pub(super) const ENTRIES: usize = 512;
 pub const PAGE_SIZE: u64 = 0x1000;
 /// The address bits below a page boundary.
 const PAGE_OFFSET_MASK: u64 = PAGE_SIZE - 1;
+/// A 2 MiB page: one PD entry that maps a whole frame instead of pointing at a
+/// table of 4 KiB pages.
+pub const HUGE_PAGE_SIZE: u64 = 0x20_0000;
+/// Bit 7 of a PD or PDPT entry: the entry maps a page itself.
+const HUGE: u64 = 1 << 7;
 /// Present: the entry maps something.
 const PRESENT: u64 = 1 << 0;
 /// Writable: writes are allowed through this entry.
@@ -140,7 +145,8 @@ pub fn translate_in(root: &[Entry], address: u64) -> Translation {
         if !entry.present() {
             return Translation::NotMapped(steps);
         }
-        if entry.huge() {
+        // Bit 7 is PS for a PDPT or PD entry, but PAT for a PT entry.
+        if entry.huge() && level != Level::Pt {
             let physical = entry.address() + (address & ((1 << shift) - 1));
             return Translation::Huge(steps, physical);
         }
@@ -192,15 +198,46 @@ impl PageTables {
         }
     }
 
-    /// Maps `0..end` at the same physical addresses, one 4 KiB page at a time.
+    /// Maps `0..end` at the same physical addresses, using 2 MiB pages for the
+    /// aligned bulk and 4 KiB pages for the tail.
+    ///
+    /// One 4 KiB page per entry would need about a million entries and 8 MiB of
+    /// page tables for 4 GiB; 2 MiB pages need 512 entries per GiB and three
+    /// tables.
     pub fn identity_map(end: u64) -> Self {
         let mut tables = Self::new();
         let mut address = 0;
+        while address + HUGE_PAGE_SIZE <= end {
+            tables.map_huge_page(address, address);
+            address += HUGE_PAGE_SIZE;
+        }
         while address < end {
             tables.map_page(address, address);
             address += PAGE_SIZE;
         }
         tables
+    }
+
+    /// Maps 2 MiB at `virtual_address`, which must be aligned to 2 MiB.
+    pub fn map_huge_page(&mut self, virtual_address: u64, physical_address: u64) {
+        assert_eq!(
+            virtual_address % HUGE_PAGE_SIZE,
+            0,
+            "virtual address alignment"
+        );
+        assert_eq!(
+            physical_address % HUGE_PAGE_SIZE,
+            0,
+            "physical address alignment"
+        );
+        let (table, index) = self
+            .pd_and_index(virtual_address, true)
+            .expect("PD allocated");
+        // SAFETY: `table` points at the PD `pd_and_index` just returned.
+        unsafe {
+            (*table).entries_mut()[index] =
+                Entry::from_raw(physical_address | PRESENT | WRITABLE | HUGE)
+        };
     }
 
     /// Maps one page, allocating the tables on the way down.
@@ -265,6 +302,60 @@ impl PageTables {
         unsafe { (*table).entries_mut()[index] = Entry::from_raw(0) };
     }
 
+    /// Walks to the PD that holds `address`, for a 2 MiB page.
+    fn pd_and_index(
+        &mut self,
+        address: u64,
+        allocate: bool,
+    ) -> Option<(*mut Table, usize)> {
+        let mut table: *mut Table = &mut *self.pml4;
+        for level in [Level::Pml4, Level::Pdpt] {
+            let index = ((address >> level.shift()) & 0x1ff) as usize;
+            // SAFETY: `table` points at a table owned by this address space.
+            let entry = unsafe { &mut (*table).entries_mut()[index] };
+            if !entry.present() {
+                if !allocate {
+                    return None;
+                }
+                let next = Box::into_raw(Table::zeroed());
+                *entry = Entry::from_raw(next as u64 | PRESENT | WRITABLE);
+            }
+            table = entry.address() as *mut Table;
+        }
+        let index = ((address >> Level::Pd.shift()) & 0x1ff) as usize;
+        Some((table, index))
+    }
+
+    /// Replaces a 2 MiB page with a table of 4 KiB pages covering the same
+    /// range, so one page inside it can be changed.
+    ///
+    /// Every translation in the 2 MiB range changes, so all of them are dropped.
+    fn split_huge_page(&mut self, address: u64) -> bool {
+        let Some((table, index)) = self.pd_and_index(address, false) else {
+            return false;
+        };
+        // SAFETY: `table` points at the PD that holds this entry.
+        let entry = unsafe { &mut (*table).entries_mut()[index] };
+        if !entry.present() || !entry.huge() {
+            return false;
+        }
+        // Attributes stay; the PS bit moves from the PD entry to a table pointer,
+        // and in a 4 KiB entry bit 7 means PAT, so it must not survive there.
+        let flags = entry.raw() & !ADDRESS_MASK & !HUGE;
+        let base = entry.address();
+        let mut pages = Table::zeroed();
+        for (index, page) in pages.entries_mut().iter_mut().enumerate() {
+            *page = Entry::from_raw(base + (index as u64) * PAGE_SIZE | flags);
+        }
+        let pages = Box::into_raw(pages);
+        *entry = Entry::from_raw(pages as u64 | PRESENT | WRITABLE);
+        let start = address & !(HUGE_PAGE_SIZE - 1);
+        for page in 0..HUGE_PAGE_SIZE / PAGE_SIZE {
+            invalidate_page(start + page * PAGE_SIZE);
+        }
+        true
+    }
+
     /// Walks down to the PT that holds `address`, allocating missing levels
     /// when `allocate` is set, and returns that table with the entry index.
     fn pt_and_index(
@@ -283,6 +374,8 @@ impl PageTables {
                 }
                 let next = Box::into_raw(Table::zeroed());
                 *entry = Entry::from_raw(next as u64 | PRESENT | WRITABLE);
+            } else if level == Level::Pd && entry.huge() {
+                self.split_huge_page(address);
             }
             table = entry.address() as *mut Table;
         }
