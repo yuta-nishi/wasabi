@@ -1,5 +1,3 @@
-//! `GetMemoryMap`: the descriptors and the buffer that holds them.
-
 use super::ffi::EfiMemoryType;
 
 #[repr(C)]

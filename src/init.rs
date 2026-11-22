@@ -1,5 +1,3 @@
-//! Startup steps that turn a UEFI application into a standalone OS.
-
 use crate::allocator::ALLOCATOR;
 use crate::console;
 use crate::graphics::Bitmap;
@@ -22,7 +20,7 @@ use crate::uefi::exit_from_efi_boot_services;
 use crate::uefi::init_vram;
 use crate::warn;
 use crate::x86;
-use crate::xhci::Controller;
+use crate::xhci::HostController;
 use crate::xhci::Registers;
 use core::sync::atomic::Ordering;
 
@@ -97,8 +95,9 @@ pub fn init_pci(
 /// Resets the xHCI controller, gives it its rings, starts it, and proves the
 /// command path with a no-op command.
 pub fn init_xhci(registers: Registers, tables: &mut PageTables) -> Result<()> {
-    let controller = Controller::init(registers, tables)?;
-    info!("xhci: version {:#06x}", controller.version());
+    let mut host = HostController::init(registers, tables)?;
+    info!("xhci: version {:#06x}", host.version());
+    host.enumerate_ports()?;
     Ok(())
 }
 

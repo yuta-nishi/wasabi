@@ -1,9 +1,3 @@
-//! ACPI: the tables the firmware describes through the RSDP.
-//!
-//! The EFI system table publishes the RSDP, the RSDP points at the XSDT, and the
-//! XSDT lists every other table by physical address. Only the HPET description
-//! is needed so far.
-
 use crate::result::Result;
 use core::mem::size_of;
 

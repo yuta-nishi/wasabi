@@ -1,8 +1,3 @@
-//! The parts of UEFI this OS uses: memory map, boot services, graphics and text.
-//!
-//! Everything here is a thin, `#[repr(C)]` view of what the firmware hands over.
-//! The modules follow the spec's structure so a field can be checked against it.
-
 mod boot_services;
 mod console;
 mod ffi;

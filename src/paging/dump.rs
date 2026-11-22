@@ -1,5 +1,3 @@
-//! Printing what the page tables say.
-
 use super::table::ADDRESS_MASK;
 use super::table::Entry;
 use super::table::Level;

@@ -1,5 +1,3 @@
-//! The tasks the OS runs after boot: the executor's demo, and the serial console.
-
 use crate::executor::Executor;
 use crate::info;
 use crate::input::Line;

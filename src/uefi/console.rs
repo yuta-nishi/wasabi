@@ -1,5 +1,3 @@
-//! Writing text onto any [`Bitmap`].
-
 use crate::graphics::Bitmap;
 use crate::graphics::draw_font_fg;
 use core::fmt;

@@ -1,6 +1,3 @@
-//! Tests for the byte-unit heap allocator. They run inside the OS on QEMU, with
-//! the heap built from the firmware's memory map (see `tests/runner.rs`).
-
 extern crate alloc;
 
 use alloc::alloc::GlobalAlloc;

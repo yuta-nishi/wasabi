@@ -1,7 +1,3 @@
-//! Interrupt plumbing: the PIC/PIT setup and the entry stubs.
-//!
-//! The stubs themselves live in `stubs`; this file programs the hardware.
-
 pub mod stubs;
 
 use crate::x86::write_io_port_u8;

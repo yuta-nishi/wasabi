@@ -1,13 +1,3 @@
-//! A cooperative executor for `async` tasks.
-//!
-//! A task is a future boxed and pinned on the heap, plus the flag that says it
-//! wants to be polled again. Waking works through [`alloc::task::Wake`], so the
-//! `Waker` a future receives can be cloned and kept: waking simply sets the
-//! flag, and the executor polls the task on its next round.
-//!
-//! Nothing here is preemptive. A future must return `Pending` for other tasks to
-//! get a turn, which is what [`yield_now`] is for.
-
 use crate::interrupts::TICKS;
 use crate::mutex::Mutex;
 use crate::x86::hlt;

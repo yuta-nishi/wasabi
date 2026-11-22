@@ -1,10 +1,3 @@
-//! Memory a device reads and writes by address.
-//!
-//! The driver fills a structure in memory and tells the controller where it is;
-//! the controller then reads those bytes and writes its answers back. The memory
-//! must therefore stay put and must not be cached: a copy left in a cache line
-//! would be a different view of the same data than the one the device sees.
-
 use crate::paging::PAGE_SIZE;
 use crate::paging::PageTables;
 use alloc::boxed::Box;
@@ -27,7 +20,9 @@ unsafe impl<T: Zeroable, const N: usize> Zeroable for [T; N] {}
 
 /// A page-aligned structure whose address the device can be given.
 ///
-/// `T` must be valid when it is all zeros, since the memory starts out zeroed.
+/// It stays put (the controller keeps the address) and is mapped uncached (a copy
+/// left in a cache line would be a different view than the device's). `T` must be
+/// valid when it is all zeros, since the memory starts out zeroed.
 pub struct IoBox<T: Sized> {
     inner: Pin<Box<IoBoxInner<T>>>,
 }

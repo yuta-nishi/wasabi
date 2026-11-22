@@ -1,9 +1,3 @@
-//! The exception and interrupt entry stubs.
-//!
-//! Every vector gets a small assembly stub that records what happened (see
-//! `crate::idt`) and then either resumes or stops the run. They live in their
-//! own file because the list of vectors is long and mostly mechanical.
-
 use core::arch::global_asm;
 
 global_asm!(

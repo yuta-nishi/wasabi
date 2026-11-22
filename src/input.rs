@@ -1,9 +1,3 @@
-//! Turning received bytes into lines.
-//!
-//! The serial port is polled, so bytes arrive one at a time and the edge cases
-//! (Enter, backspace, a line longer than the buffer) are decided here, away from
-//! the hardware. That also makes them testable without a terminal.
-
 /// Longest line kept. Further bytes are dropped until the next line ends, so a
 /// pasted paragraph cannot grow the buffer at run time.
 pub const LINE_CAPACITY: usize = 64;

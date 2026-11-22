@@ -1,15 +1,11 @@
-//! Memory-mapped device registers.
-//!
-//! A register is not memory: it changes when the device decides to, and reading
-//! it can have side effects. Reaching it only through [`Mmio::read`] and
-//! [`Mmio::write`], which are volatile, keeps the compiler from caching a value
-//! in a CPU register or from removing a write it thinks is redundant.
-
 use core::marker::PhantomData;
 use core::ptr::read_volatile;
 use core::ptr::write_volatile;
 
 /// A pointer to device registers shaped like `T`.
+///
+/// A register is not memory: it changes when the device decides to, and reading
+/// it can have side effects. Both methods are volatile for that reason.
 pub struct Mmio<T: Copy> {
     address: usize,
     _value: PhantomData<T>,
