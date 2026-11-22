@@ -45,7 +45,7 @@ extern "efiapi" fn efi_main(
         total_memory_pages += e.number_of_pages();
         println!("{e:?}");
     }
-    let total_memory_size_mib = total_memory_pages * 4096 / 1024 / 1024;
+    let total_memory_size_mib = total_memory_pages * paging::PAGE_SIZE / 1024 / 1024;
     println!("Total: {total_memory_pages} pages = {total_memory_size_mib} MiB");
     println!("Hello, Non-UEFI world!");
     let _exceptions = exceptions::init();
@@ -55,12 +55,12 @@ extern "efiapi" fn efi_main(
 
     init_timer(efi_system_table).expect("initializing the timer failed");
 
-    let tables = init_paging(&memory_map);
+    let mut tables = init_paging(&memory_map);
     tables.switch();
     info!("paging: switched to our own tables");
     paging::dump_root();
 
-    init_pci(efi_system_table).expect("listing the PCI devices failed");
+    init_pci(efi_system_table, &mut tables).expect("listing the PCI devices failed");
 
     init_interrupts(1_000).expect("initializing the timer interrupt failed");
 

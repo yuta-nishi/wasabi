@@ -10,12 +10,17 @@ use core::pin::Pin;
 pub(super) const ADDRESS_MASK: u64 = 0x000f_ffff_ffff_f000;
 pub(super) const ENTRIES: usize = 512;
 
-/// Size of one page, and therefore of one table.
-pub const PAGE_SIZE: u64 = 4096;
+/// 4 KiB (`1 << 12`): the unit a page table maps, and therefore the size of one
+/// table.
+pub const PAGE_SIZE: u64 = 0x1000;
+/// The address bits below a page boundary.
+const PAGE_OFFSET_MASK: u64 = PAGE_SIZE - 1;
 /// Present: the entry maps something.
 const PRESENT: u64 = 1 << 0;
 /// Writable: writes are allowed through this entry.
 const WRITABLE: u64 = 1 << 1;
+/// Page cache disable: reads and writes always go to the device.
+pub const NO_CACHE: u64 = 1 << 4;
 
 /// One page of entries. It must be page aligned: its address is stored in the
 /// high bits of the entry that points at it, so a misaligned table would put
@@ -139,7 +144,7 @@ pub fn translate_in(root: &[Entry], address: u64) -> Translation {
             return Translation::Huge(steps, physical);
         }
         if level == Level::Pt {
-            let physical = entry.address() + (address & 0xfff);
+            let physical = entry.address() + (address & PAGE_OFFSET_MASK);
             return Translation::Page(steps, physical);
         }
         table = next(entry);
@@ -188,6 +193,28 @@ impl PageTables {
 
     /// Maps one page, allocating the tables on the way down.
     pub fn map_page(&mut self, virtual_address: u64, physical_address: u64) {
+        self.map_page_with(virtual_address, physical_address, PRESENT | WRITABLE);
+    }
+
+    /// Maps one page of device memory.
+    ///
+    /// The cache-disable bit matters here: a cached read of a device register
+    /// returns the old value instead of asking the device again.
+    pub fn map_page_uncached(&mut self, virtual_address: u64, physical_address: u64) {
+        self.map_page_with(
+            virtual_address,
+            physical_address,
+            PRESENT | WRITABLE | NO_CACHE,
+        );
+    }
+
+    /// # Invalidation
+    ///
+    /// Replacing an entry that was already present does not invalidate anything:
+    /// the CPU may keep translating through the old attributes until the entry
+    /// is flushed. Newly mapped pages need no flush, because a translation the
+    /// CPU never made is not cached.
+    fn map_page_with(&mut self, virtual_address: u64, physical_address: u64, flags: u64) {
         assert_eq!(virtual_address % PAGE_SIZE, 0, "virtual address alignment");
         assert_eq!(
             physical_address % PAGE_SIZE,
@@ -200,8 +227,7 @@ impl PageTables {
             .expect("walking with allocation always reaches a PT");
         // SAFETY: `table` points at the PT `pt_and_index` just returned.
         unsafe {
-            (*table).entries_mut()[index] =
-                Entry::from_raw(physical_address | PRESENT | WRITABLE)
+            (*table).entries_mut()[index] = Entry::from_raw(physical_address | flags)
         };
     }
 

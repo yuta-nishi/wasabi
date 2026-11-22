@@ -9,6 +9,7 @@ use crate::info;
 use crate::interrupts;
 use crate::paging::PAGE_SIZE;
 use crate::paging::PageTables;
+use crate::pci::Bar;
 use crate::pci::ConfigSpace;
 use crate::result::Result;
 use crate::serial::Serial;
@@ -19,6 +20,7 @@ use crate::uefi::EfiSystemTable;
 use crate::uefi::MemoryMapHolder;
 use crate::uefi::exit_from_efi_boot_services;
 use crate::uefi::init_vram;
+use crate::warn;
 use crate::x86;
 use core::sync::atomic::Ordering;
 
@@ -43,12 +45,50 @@ pub fn init_basic_runtime(
     memory_map
 }
 
-/// Finds the ECAM window described by ACPI and lists the functions behind it.
-pub fn init_pci(efi_system_table: &EfiSystemTable) -> Result<()> {
+/// Finds the ECAM window described by ACPI, lists the functions behind it, and
+/// gets the xHCI controller ready to be driven.
+pub fn init_pci(
+    efi_system_table: &EfiSystemTable,
+    tables: &mut PageTables,
+) -> Result<()> {
     let rsdp = efi_system_table
         .acpi_rsdp()
         .ok_or("the firmware has no ACPI table")?;
-    ConfigSpace::from_acpi(rsdp)?.probe();
+    let pci = ConfigSpace::from_acpi(rsdp)?;
+    let xhci = pci.probe().ok_or("no xHCI controller on the PCI bus")?;
+    let Some(Bar::Memory {
+        address,
+        size,
+        prefetchable,
+    }) = pci.bar(xhci, 0)
+    else {
+        return Err("the xHCI controller has no memory BAR0");
+    };
+    if prefetchable {
+        // Prefetchable promises that reads have no side effects, which is the
+        // opposite of a register window: the CPU may read it speculatively.
+        warn!("pci: the xHCI register window is marked prefetchable");
+    }
+    let pages = size.div_ceil(PAGE_SIZE);
+    info!("pci: xHCI at {xhci}, BAR0 {address:#018x} ({pages} pages, {size:#x} bytes)");
+    // The controller's registers are device memory: map the window the way the
+    // device describes it, uncached, whether or not the identity map happened to
+    // cover it.
+    for page in 0..pages {
+        let offset = page * PAGE_SIZE;
+        tables.map_page_uncached(address + offset, address + offset);
+    }
+    // Without these bits the controller ignores the register window and cannot
+    // read the rings, which is everything the driver does.
+    pci.enable(xhci);
+    info!("pci: xHCI command register is {:#06x}", pci.command(xhci));
+    // SAFETY: the window is mapped above and holds the controller's registers.
+    let capability = unsafe { core::ptr::read_volatile(address as *const u32) };
+    info!(
+        "pci: xHCI capability {capability:#010x} (caplength {:#04x}, version {:#06x})",
+        (capability & 0xff) as u8,
+        ((capability >> 16) & 0xffff) as u16
+    );
     Ok(())
 }
 
