@@ -1,10 +1,3 @@
-//! Global Descriptor Table and Task State Segment.
-//!
-//! Long mode barely uses segmentation, but the CPU still needs a GDT to hold the
-//! TSS descriptor and to give the kernel a valid code/data segment. Everything
-//! here is referenced by address, so the owners are returned instead of being
-//! dropped.
-
 use crate::x86::DescriptorTablePointer;
 use alloc::boxed::Box;
 use core::arch::asm;
@@ -63,6 +56,9 @@ const fn tss_low(base: u64, limit: u32) -> u64 {
 }
 
 /// Owns the GDT, the TSS and the interrupt stack they point at.
+///
+/// Long mode barely uses segmentation, but the CPU still needs a GDT to hold the
+/// TSS descriptor and to give the kernel a valid code segment.
 pub struct Gdt {
     entries: Pin<Box<GdtBacking>>,
     _tss: Pin<Box<Tss>>,

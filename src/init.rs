@@ -1,5 +1,3 @@
-//! Startup steps that turn a UEFI application into a standalone OS.
-
 use crate::allocator::ALLOCATOR;
 use crate::console;
 use crate::graphics::Bitmap;
@@ -99,7 +97,7 @@ pub fn init_pci(
 pub fn init_xhci(registers: Registers, tables: &mut PageTables) -> Result<()> {
     let mut host = HostController::init(registers, tables)?;
     info!("xhci: version {:#06x}", host.version());
-    host.connect_devices()?;
+    host.enumerate_ports()?;
     Ok(())
 }
 

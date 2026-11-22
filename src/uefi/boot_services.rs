@@ -1,5 +1,3 @@
-//! The boot services table, the system table, and the protocols we borrow.
-
 use super::ffi::EfiGuid;
 use super::ffi::EfiHandle;
 use super::ffi::EfiStatus;

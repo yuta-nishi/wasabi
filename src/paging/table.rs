@@ -1,5 +1,3 @@
-//! The page table tree: entries, levels, the walk, and building our own.
-
 use crate::x86::read_cr3;
 use crate::x86::write_cr3;
 use alloc::boxed::Box;

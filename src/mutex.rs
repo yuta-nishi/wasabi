@@ -1,9 +1,3 @@
-//! A spin lock, the simplest way to share data between tasks and interrupts.
-//!
-//! There is no scheduler involvement: a second locker simply spins until the
-//! first one drops its guard. That is fine while critical sections are short,
-//! and it is the only option before the OS can block a task.
-
 use crate::x86::disable_interrupts;
 use crate::x86::restore_interrupts;
 use core::cell::UnsafeCell;

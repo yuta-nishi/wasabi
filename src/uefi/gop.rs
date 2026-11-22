@@ -1,5 +1,3 @@
-//! The graphics output protocol and the framebuffer it describes.
-
 use super::boot_services::EfiSystemTable;
 use super::ffi::EfiGuid;
 use crate::graphics::Bitmap;

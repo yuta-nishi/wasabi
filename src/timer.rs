@@ -1,12 +1,3 @@
-//! The High Precision Event Timer, and a future that waits on it.
-//!
-//! The HPET is a free-running 64-bit counter. Its capability register reports
-//! the counter period in femtoseconds (10 ns on QEMU), which is all we need to
-//! turn ticks into time.
-//!
-//! The timer is registered once at boot and read through two atomics, so tasks
-//! (and later interrupt handlers) can ask for the time without locking.
-
 use crate::acpi::GenericAddress;
 use crate::acpi::Rsdp;
 use crate::acpi::TableHeader;

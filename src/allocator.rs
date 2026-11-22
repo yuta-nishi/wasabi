@@ -1,11 +1,3 @@
-//! A byte-unit heap allocator.
-//!
-//! Every region of the heap is described by a `Header` that lives inside it,
-//! and the headers are chained into a singly-linked list (`is_allocated`
-//! separates free regions from handed-out ones). Allocation walks the list and
-//! splits the first region that can hold the request (first fit); freeing only
-//! clears that region's `is_allocated` flag again.
-
 extern crate alloc;
 
 use crate::result::Result;
@@ -151,6 +143,8 @@ impl fmt::Debug for Header {
     }
 }
 
+/// Regions chained by their headers; allocation takes the first one that fits
+/// and splits it, and freeing only clears the region's flag.
 pub struct FirstFitAllocator {
     first_header: RefCell<Option<Box<Header>>>,
 }

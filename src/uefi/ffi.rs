@@ -1,5 +1,3 @@
-//! The plain UEFI data types shared by every other module.
-
 pub type EfiHandle = u64;
 
 /// A C output parameter: a pointer through which the callee writes a `T`.

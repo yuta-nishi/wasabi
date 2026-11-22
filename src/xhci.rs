@@ -1,17 +1,3 @@
-//! The xHCI controller: its register windows, and the rings it reads from memory.
-//!
-//! The controller is reached through one memory window (its BAR0) that holds four
-//! register groups at offsets the controller itself reports: the capability
-//! registers at 0, the operational registers at `CAPLENGTH`, the runtime registers
-//! at `RTSOFF`, and the doorbell array at `DBOFF`.
-//!
-//! Work is handed over through rings in physical memory: the driver writes a
-//! transfer request block (TRB) into the command ring and rings the doorbell, and
-//! the controller writes events into the event ring.
-//!
-//! Register and TRB layouts follow the xHCI specification:
-//! <https://www.intel.com/content/www/us/en/standards/xhci-specification.html>.
-
 use crate::info;
 use crate::iobox::IoBox;
 use crate::iobox::Zeroable;
@@ -83,10 +69,9 @@ const MAX_SCRATCHPAD: usize = 1023;
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 struct Trb {
-    dword0: u32,
-    dword1: u32,
-    dword2: u32,
-    dword3: u32,
+    parameter: u64,
+    status: u32,
+    control: u32,
 }
 
 // SAFETY: a TRB is four integers, so every bit pattern is valid.
@@ -106,22 +91,22 @@ const TRB_PORT_STATUS_CHANGE: u32 = 34;
 const COMPLETION_SUCCESS: u32 = 1;
 
 fn trb_type(trb: &Trb) -> u32 {
-    (trb.dword3 >> 10) & 0x3f
+    (trb.control >> 10) & 0x3f
 }
 
 fn completion_code(trb: &Trb) -> u32 {
-    (trb.dword2 >> 24) & 0xff
+    (trb.status >> 24) & 0xff
 }
 
 /// The slot a completion event was about.
 fn slot_id(trb: &Trb) -> u32 {
-    trb.dword3 >> 24
+    trb.control >> 24
 }
 
 impl Trb {
     fn no_op_command(cycle: bool) -> Self {
         Self {
-            dword3: (TRB_NO_OP_COMMAND << 10) | u32::from(cycle),
+            control: (TRB_NO_OP_COMMAND << 10) | u32::from(cycle),
             ..Self::default()
         }
     }
@@ -129,7 +114,7 @@ impl Trb {
     /// `Enable Slot`: the controller answers with the slot it picked.
     fn enable_slot(cycle: bool, slot_type: u32) -> Self {
         Self {
-            dword3: (TRB_ENABLE_SLOT << 10) | (slot_type << 16) | u32::from(cycle),
+            control: (TRB_ENABLE_SLOT << 10) | (slot_type << 16) | u32::from(cycle),
             ..Self::default()
         }
     }
@@ -138,10 +123,9 @@ impl Trb {
     /// the controller can tell a fresh lap from the previous one.
     fn link(ring: u64, cycle: bool) -> Self {
         Self {
-            dword0: ring as u32,
-            dword1: (ring >> 32) as u32,
-            dword2: 0,
-            dword3: (TRB_LINK << 10) | (1 << 1) | u32::from(cycle),
+            parameter: ring,
+            status: 0,
+            control: (TRB_LINK << 10) | (1 << 1) | u32::from(cycle),
         }
     }
 }
@@ -161,7 +145,11 @@ unsafe impl Zeroable for ErstEntry {}
 // SAFETY: a byte has no invalid bit pattern.
 unsafe impl Zeroable for [u8; 4096] {}
 
-/// The four register groups, as addresses inside the controller's window.
+/// The four register groups of a host controller's window.
+///
+/// The capability registers start the window, the operational registers sit at
+/// `CAPLENGTH`, the runtime registers at `RTSOFF`, and the doorbell array at
+/// `DBOFF`; the controller reports all three offsets itself.
 pub struct Registers {
     window: Window,
     caplength: u64,
@@ -305,7 +293,7 @@ impl<const N: usize> Ring<N> {
 
     /// Hands over one entry. The last slot is the link, so `N - 1` are usable and
     /// a ring that fills up needs a lap the driver cannot start yet.
-    fn push(&mut self, trb: Trb) -> Result<()> {
+    fn enqueue(&mut self, trb: Trb) -> Result<()> {
         if self.index + 1 >= N {
             return Err("the command ring is full");
         }
@@ -317,9 +305,9 @@ impl<const N: usize> Ring<N> {
     }
 
     /// The next entry whose cycle bit says it belongs to this lap.
-    fn take(&mut self) -> Option<Trb> {
+    fn dequeue(&mut self) -> Option<Trb> {
         let entry = self.entries.read_slot(self.index)?;
-        if (entry.dword3 & 1 != 0) != self.cycle {
+        if (entry.control & 1 != 0) != self.cycle {
             return None;
         }
         self.index += 1;
@@ -496,7 +484,7 @@ impl HostController {
 
     /// Finds connected devices, resets their ports, and lets the controller pick
     /// a slot for each.
-    pub fn connect_devices(&mut self) -> Result<()> {
+    pub fn enumerate_ports(&mut self) -> Result<()> {
         for port in 1..=self.max_ports {
             let status = self.registers.port_status(port).read();
             if status & PORTSC_CONNECTED == 0 {
@@ -543,7 +531,7 @@ impl HostController {
 
     /// Hands one command TRB to the controller.
     fn command(&mut self, trb: Trb) -> Result<()> {
-        self.command_ring.push(trb)?;
+        self.command_ring.enqueue(trb)?;
         self.registers.ring_doorbell(0, 0);
         Ok(())
     }
@@ -565,7 +553,7 @@ impl HostController {
     fn next_event(&mut self) -> Result<Trb> {
         let deadline = timer::nanoseconds() + TIMEOUT_MS * 1_000_000;
         loop {
-            if let Some(event) = self.event_ring.take() {
+            if let Some(event) = self.event_ring.dequeue() {
                 // Tell the controller how far the driver has read; the address is
                 // 16-byte aligned, so this also clears the busy bit.
                 let dequeue = self.event_ring.address() + self.event_ring.offset();

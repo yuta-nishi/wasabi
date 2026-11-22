@@ -1,13 +1,3 @@
-//! Interrupt Descriptor Table and the exception entry stubs.
-//!
-//! Every vector gets a small assembly stub. Each stub records what happened in
-//! the statics below before it hands over: the CPU pushed the interrupted RIP
-//! (and an error code for some vectors) when it entered the stub, so the values
-//! are read from the hardware frame before anything else is pushed.
-//!
-//! The breakpoint exception counts itself and returns to the interrupted code;
-//! anything else reports and stops the run.
-
 use crate::error;
 use crate::interrupts;
 use crate::qemu::QemuExitCode;
@@ -120,7 +110,8 @@ impl IdtDescriptor {
     }
 }
 
-/// Owns the table the IDTR points at.
+/// Owns the table the IDTR points at; every vector is an entry from the stub
+/// table, which records what happened before handing over.
 pub struct Idt {
     entries: Pin<Box<[IdtDescriptor; 0x100]>>,
 }

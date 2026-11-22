@@ -1,9 +1,3 @@
-//! The serial port (COM1), one of the two sinks `print!` writes to.
-//!
-//! Only knows how to put bytes on COM1; the `print!` family forwards each chunk
-//! here and to the framebuffer. QEMU is started with `-serial stdio`, so what is
-//! written here shows up in the terminal that runs `cargo test` or `cargo run`.
-
 use crate::result::Result;
 use crate::x86::read_io_port_u8;
 use crate::x86::write_io_port_u8;

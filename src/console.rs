@@ -1,9 +1,3 @@
-//! Where `print!` and `println!` go: the serial port, and the screen once it is
-//! available.
-//!
-//! Formatting happens once; the resulting string chunks are forwarded to both
-//! sinks, so the two outputs never disagree.
-
 use crate::mutex::Mutex;
 use crate::serial::Serial;
 use crate::uefi::BitmapTextWriter;

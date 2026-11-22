@@ -1,5 +1,3 @@
-//! Installs the exception machinery: GDT/TSS first, then the IDT.
-
 use crate::gdt::Gdt;
 use crate::gdt::KERNEL_CODE_SELECTOR;
 use crate::idt::Idt;
