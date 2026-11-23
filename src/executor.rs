@@ -138,6 +138,19 @@ impl Executor {
     }
 }
 
+/// The executor the OS runs its tasks on.
+static EXECUTOR: Executor = Executor::new();
+
+/// Adds a future to the global executor.
+pub fn spawn(future: impl Future<Output = ()> + 'static) -> Arc<Task> {
+    EXECUTOR.spawn(future)
+}
+
+/// Hands the CPU to the global executor, forever.
+pub fn run() -> ! {
+    EXECUTOR.run()
+}
+
 /// A future that returns `Pending` once, waking itself, so that the executor
 /// gets to poll the other tasks first.
 pub struct YieldNow {

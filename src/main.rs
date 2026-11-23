@@ -2,7 +2,6 @@
 #![no_main]
 
 use core::panic::PanicInfo;
-use wasabi::demo;
 use wasabi::error;
 use wasabi::exceptions;
 use wasabi::info;
@@ -15,7 +14,6 @@ use wasabi::init::init_serial;
 use wasabi::init::init_timer;
 use wasabi::init::init_xhci;
 use wasabi::paging;
-use wasabi::println;
 use wasabi::qemu::QemuExitCode;
 use wasabi::qemu::exit_qemu;
 use wasabi::uefi::EfiHandle;
@@ -38,36 +36,33 @@ extern "efiapi" fn efi_main(
         loaded_image.image_base as usize, loaded_image.image_size
     );
     let memory_map = init_basic_runtime(image_handle, efi_system_table);
-    let mut total_memory_pages = 0;
-    for e in memory_map.iter() {
-        if e.memory_type() != EfiMemoryType::CONVENTIONAL_MEMORY {
-            continue;
-        }
-        total_memory_pages += e.number_of_pages();
-        println!("{e:?}");
-    }
-    let total_memory_size_mib = total_memory_pages * paging::PAGE_SIZE / 1024 / 1024;
-    println!("Total: {total_memory_pages} pages = {total_memory_size_mib} MiB");
-    println!("Hello, Non-UEFI world!");
+    let conventional_pages: u64 = memory_map
+        .iter()
+        .filter(|descriptor| {
+            descriptor.memory_type() == EfiMemoryType::CONVENTIONAL_MEMORY
+        })
+        .map(|descriptor| descriptor.number_of_pages())
+        .sum();
+    info!(
+        "memory: {conventional_pages} pages = {} MiB",
+        conventional_pages * paging::PAGE_SIZE / 1024 / 1024
+    );
     exceptions::init();
-    paging::dump_root();
-    paging::dump_translation(0);
-    paging::dump_translation(efi_main as *const () as usize as u64);
 
     init_timer(efi_system_table).expect("initializing the timer failed");
 
     let mut tables = init_paging(&memory_map);
     tables.switch();
     info!("paging: switched to our own tables");
-    paging::dump_root();
 
     let registers =
         init_pci(efi_system_table, &mut tables).expect("listing the PCI devices failed");
-    init_xhci(registers, &mut tables).expect("initializing the xHCI controller failed");
+    init_xhci(registers, tables);
 
     init_interrupts(1_000).expect("initializing the timer interrupt failed");
 
-    demo::run()
+    wasabi::input::spawn_console();
+    wasabi::executor::run()
 }
 
 #[panic_handler]

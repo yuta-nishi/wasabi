@@ -1,4 +1,6 @@
 use crate::bitfield;
+use crate::error;
+use crate::executor;
 use crate::info;
 use crate::iobox::IoBox;
 use crate::iobox::Zeroable;
@@ -249,6 +251,7 @@ pub enum TrbType {
     StatusStage,
     Link,
     EnableSlot,
+    DisableSlot,
     AddressDevice,
     NoOpCommand,
     TransferEvent,
@@ -265,6 +268,7 @@ impl TrbType {
             Self::StatusStage => 4,
             Self::Link => 6,
             Self::EnableSlot => 9,
+            Self::DisableSlot => 10,
             Self::AddressDevice => 11,
             Self::NoOpCommand => 23,
             Self::TransferEvent => 32,
@@ -281,6 +285,7 @@ impl TrbType {
             4 => Self::StatusStage,
             6 => Self::Link,
             9 => Self::EnableSlot,
+            10 => Self::DisableSlot,
             11 => Self::AddressDevice,
             23 => Self::NoOpCommand,
             32 => Self::TransferEvent,
@@ -330,6 +335,14 @@ impl Trb {
             control: (TrbType::AddressDevice.raw() << 10)
                 | (slot << 24)
                 | u32::from(cycle),
+        }
+    }
+
+    /// `Disable Slot`: frees a slot the device was using.
+    fn disable_slot(slot: u32, cycle: bool) -> Self {
+        Self {
+            control: (TrbType::DisableSlot.raw() << 10) | (slot << 24) | u32::from(cycle),
+            ..Self::default()
         }
     }
 
@@ -510,6 +523,24 @@ impl Registers {
     }
 }
 
+/// Brings the controller up inside a task: it proves the command path, addresses
+/// the devices already on the ports, and then watches for changes.
+pub fn start(registers: Registers, mut tables: PageTables) {
+    executor::spawn(async move {
+        if let Err(message) = run(registers, &mut tables).await {
+            error!("xhci: {message}");
+        }
+    });
+}
+
+async fn run(registers: Registers, tables: &mut PageTables) -> Result<()> {
+    let mut host = HostController::init(registers, tables)?;
+    info!("xhci: version {:#06x}", host.version());
+    host.check_with_no_op().await?;
+    host.enumerate_ports(tables).await?;
+    host.watch(tables).await
+}
+
 /// A ring of TRBs that the controller walks at its own pace.
 ///
 /// The driver writes entries at `index`; the cycle bit on each entry marks the
@@ -639,7 +670,9 @@ impl Ports {
 struct Device {
     slot: u32,
     port: u32,
-    /// The endpoint 0 ring: control transfers go through it.
+    /// The endpoint 0 ring: control transfers go through it. Held until the
+    /// transfers of the next chapter use it.
+    #[allow(dead_code)]
     endpoint0_ring: Ring<RING_TRBS>,
     /// Where the controller keeps the device's contexts.
     _device_context: IoBox<[u32; CONTEXT_WORDS]>,
@@ -684,6 +717,8 @@ impl CommandChannel {
 struct EventChannel {
     ring: Ring<RING_TRBS>,
     event_ring_segment_table: IoBox<[ErstEntry; 1]>,
+    /// Ports the controller reported a change on, waiting to be handled.
+    port_changes: Vec<u32>,
 }
 
 impl EventChannel {
@@ -691,6 +726,7 @@ impl EventChannel {
         Self {
             ring: Ring::new(tables),
             event_ring_segment_table: IoBox::new(tables),
+            port_changes: Vec::new(),
         }
     }
 
@@ -715,32 +751,35 @@ impl EventChannel {
         Ok(())
     }
 
-    /// The next event the controller writes, if one is waiting.
-    fn next(&mut self, registers: &Registers) -> Result<Trb> {
+    /// Takes one event if the controller has written one.
+    fn take(&mut self, registers: &Registers) -> Option<Trb> {
+        let event = self.ring.dequeue()?;
+        let dequeue = self.ring.address() + self.ring.offset();
+        registers.write_rt64(offset_of!(Interrupter, erdp), dequeue);
+        Some(event)
+    }
+
+    /// Waits for a command's completion.
+    ///
+    /// Port changes are recorded rather than returned: they are the host's
+    /// business, not the command's. Waiting yields to the other tasks instead of
+    /// spinning.
+    async fn wait_for_completion(&mut self, registers: &Registers) -> Result<Trb> {
         let deadline = timer::nanoseconds() + TIMEOUT_MS * 1_000_000;
         loop {
-            if let Some(event) = self.ring.dequeue() {
-                let dequeue = self.ring.address() + self.ring.offset();
-                registers.write_rt64(offset_of!(Interrupter, erdp), dequeue);
-                return Ok(event);
+            while let Some(event) = self.take(registers) {
+                match trb_type(&event) {
+                    TrbType::CommandCompletion => return Ok(event),
+                    TrbType::PortStatusChange => {
+                        self.port_changes.push(event.parameter as u32 >> 24);
+                    }
+                    _ => continue,
+                }
             }
             if timer::nanoseconds() >= deadline {
                 return Err("the xHCI controller sent no event");
             }
-            core::hint::spin_loop();
-        }
-    }
-
-    /// Waits for a command's completion, letting events that belong to other
-    /// things pass: ports report changes on their own schedule.
-    fn wait_for_completion(&mut self, registers: &Registers) -> Result<Trb> {
-        loop {
-            let event = self.next(registers)?;
-            match trb_type(&event) {
-                TrbType::CommandCompletion => return Ok(event),
-                TrbType::PortStatusChange => continue,
-                _ => continue,
-            }
+            timer::sleep(core::time::Duration::from_millis(1)).await;
         }
     }
 }
@@ -938,7 +977,6 @@ impl HostController {
         };
         controller.program(max_slots, scratchpad, tables)?;
         controller.start()?;
-        controller.check_with_no_op()?;
         Ok(controller)
     }
 
@@ -1006,10 +1044,10 @@ impl HostController {
     /// Sends a no-op command and waits for its completion event: if that arrives,
     /// the doorbell, the command ring, the event ring and the completion path all
     /// work.
-    fn check_with_no_op(&mut self) -> Result<()> {
+    async fn check_with_no_op(&mut self) -> Result<()> {
         let trb = Trb::no_op_command(self.commands.cycle_state());
         self.commands.send(&self.registers, trb)?;
-        let event = self.events.wait_for_completion(&self.registers)?;
+        let event = self.events.wait_for_completion(&self.registers).await?;
         if completion_code(&event) != CompletionCode::Success {
             return Err("the no-op command did not complete successfully");
         }
@@ -1017,45 +1055,101 @@ impl HostController {
         Ok(())
     }
 
-    /// Finds connected devices, resets their ports, and lets the controller pick
-    /// a slot for each.
-    pub fn enumerate_ports(&mut self, tables: &mut PageTables) -> Result<()> {
+    /// Finds the devices already on the ports and addresses them.
+    pub async fn enumerate_ports(&mut self, tables: &mut PageTables) -> Result<()> {
         for port in 1..=self.ports.number_of_ports() {
             let status = self.ports.status(port);
             if status.connected() == 0 {
                 continue;
             }
-            self.ports.acknowledge(port, status);
-            info!(
-                "xhci: port {port} has a device (portsc {:#010x})",
-                status.raw()
-            );
-            self.ports.reset(port)?;
-            let after = self.ports.status(port);
-            // Slot type 0 is a USB2 device; a SuperSpeed port asks for type 1.
-            let slot = self.enable_slot(0)?;
-            info!(
-                "xhci: port {port} reset (portsc {:#010x}), slot {slot} assigned",
-                after.raw()
-            );
-            self.address_device(tables, slot, port)?;
+            self.attach_device(tables, port).await?;
         }
-        for device in &self.devices {
-            info!(
-                "xhci: slot {} on port {} addressed, endpoint 0 ring at {:#018x}",
-                device.slot,
-                device.port,
-                device.endpoint0_ring.address()
-            );
+        Ok(())
+    }
+
+    /// Resets the port, gives the device a slot and an address.
+    async fn attach_device(&mut self, tables: &mut PageTables, port: u32) -> Result<()> {
+        let status = self.ports.status(port);
+        self.ports.acknowledge(port, status);
+        info!(
+            "xhci: port {port} has a device (portsc {:#010x})",
+            status.raw()
+        );
+        self.ports.reset(port)?;
+        let after = self.ports.status(port);
+        // Slot type 0 is a USB2 device; a SuperSpeed port asks for type 1.
+        let slot = self.enable_slot(0).await?;
+        info!(
+            "xhci: port {port} reset (portsc {:#010x}), slot {slot} assigned",
+            after.raw()
+        );
+        self.address_device(tables, slot, port).await?;
+        Ok(())
+    }
+
+    /// Keeps reading events and handles any port that changed while the OS runs.
+    async fn watch(&mut self, tables: &mut PageTables) -> Result<()> {
+        loop {
+            // The controller writes its events without telling the CPU; a short
+            // sleep keeps the polling from starving the other tasks.
+            timer::sleep(core::time::Duration::from_millis(1)).await;
+            while let Some(event) = self.events.take(&self.registers) {
+                match trb_type(&event) {
+                    TrbType::PortStatusChange => {
+                        self.handle_port_change(tables, event.parameter as u32 >> 24)
+                            .await?;
+                    }
+                    other => info!("xhci: event {other:?} with nothing waiting for it"),
+                }
+            }
+            while let Some(port) = self.events.port_changes.pop() {
+                self.handle_port_change(tables, port).await?;
+            }
+        }
+    }
+
+    async fn handle_port_change(
+        &mut self,
+        tables: &mut PageTables,
+        port: u32,
+    ) -> Result<()> {
+        let status = self.ports.status(port);
+        self.ports.acknowledge(port, status);
+        if status.connected() == 0 {
+            if let Some(position) =
+                self.devices.iter().position(|device| device.port == port)
+            {
+                let device = self.devices.remove(position);
+                self.disable_slot(device.slot).await?;
+                info!(
+                    "xhci: port {port} lost its device, slot {} freed",
+                    device.slot
+                );
+            }
+            return Ok(());
+        }
+        if self.devices.iter().any(|device| device.port == port) {
+            return Ok(());
+        }
+        self.attach_device(tables, port).await
+    }
+
+    /// Frees the slot a device was using.
+    async fn disable_slot(&mut self, slot: u32) -> Result<()> {
+        let trb = Trb::disable_slot(slot, self.commands.cycle_state());
+        self.commands.send(&self.registers, trb)?;
+        let event = self.events.wait_for_completion(&self.registers).await?;
+        if completion_code(&event) != CompletionCode::Success {
+            return Err("the disable slot command failed");
         }
         Ok(())
     }
 
     /// Asks the controller for a slot, which is where a device's contexts live.
-    fn enable_slot(&mut self, slot_type: u32) -> Result<u32> {
+    async fn enable_slot(&mut self, slot_type: u32) -> Result<u32> {
         let trb = Trb::enable_slot(self.commands.cycle_state(), slot_type);
         self.commands.send(&self.registers, trb)?;
-        let event = self.events.wait_for_completion(&self.registers)?;
+        let event = self.events.wait_for_completion(&self.registers).await?;
         if completion_code(&event) != CompletionCode::Success {
             return Err("the enable slot command failed");
         }
@@ -1064,7 +1158,7 @@ impl HostController {
 
     /// Gives the device on `port` an address: the input context describes the
     /// slot and endpoint 0, and the controller fills in the device context.
-    fn address_device(
+    async fn address_device(
         &mut self,
         tables: &mut PageTables,
         slot: u32,
@@ -1089,7 +1183,7 @@ impl HostController {
             self.commands.cycle_state(),
         );
         self.commands.send(&self.registers, trb)?;
-        let event = self.events.wait_for_completion(&self.registers)?;
+        let event = self.events.wait_for_completion(&self.registers).await?;
         if completion_code(&event) != CompletionCode::Success {
             return Err("the address device command failed");
         }

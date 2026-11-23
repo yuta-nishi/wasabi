@@ -1,3 +1,10 @@
+use crate::executor;
+use crate::info;
+use crate::println;
+use crate::serial::Serial;
+use crate::timer;
+use core::time::Duration;
+
 /// Longest line kept. Further bytes are dropped until the next line ends, so a
 /// pasted paragraph cannot grow the buffer at run time.
 pub const LINE_CAPACITY: usize = 64;
@@ -50,4 +57,32 @@ impl Line {
             }
         }
     }
+}
+
+/// Polls the serial port and logs each line once Enter arrives.
+///
+/// `Serial::try_read` only touches the data register when the line status says a
+/// byte is waiting, so this task polls with `sleep` and the other tasks keep
+/// their turns.
+pub fn spawn_console() {
+    executor::spawn(async {
+        let mut serial = Serial;
+        let mut line = Line::new();
+        // QEMU's window and the terminal both take keys: only the terminal's
+        // reach COM1, and only while no key is held by the window.
+        println!("serial console: type in this terminal, then press Enter");
+        loop {
+            while let Some(byte) = serial.try_read() {
+                match line.push(byte) {
+                    Some(text) => {
+                        let text = core::str::from_utf8(text).unwrap_or("<not utf-8>");
+                        info!("input: \"{text}\"");
+                    }
+                    None if byte == b'\r' || byte == b'\n' => println!(),
+                    None => {}
+                }
+            }
+            timer::sleep(Duration::from_millis(10)).await;
+        }
+    });
 }
