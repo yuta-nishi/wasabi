@@ -1,4 +1,3 @@
-use wasabi::pci::Command;
 use wasabi::xhci::CompletionCode;
 use wasabi::xhci::EndpointContext1;
 use wasabi::xhci::Portsc;
@@ -66,14 +65,4 @@ pub fn context_words_use_the_specification_positions() {
     endpoint1.set_cerr(3);
     // CErr is bits 2..1, the type bits 5..3, the packet size bits 31..16.
     assert_eq!(endpoint1.raw(), (64 << 16) | (4 << 3) | (3 << 1));
-}
-
-pub fn pci_command_fields_are_named() {
-    let mut command = Command::new(0);
-    command.set_memory_space(1);
-    command.set_bus_master(1);
-    assert_eq!(command.raw(), 0b110);
-    assert_eq!(command.memory_space(), 1);
-    assert_eq!(command.bus_master(), 1);
-    assert_eq!(command.io_space(), 0);
 }

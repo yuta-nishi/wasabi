@@ -17,6 +17,8 @@ mod interrupts;
 mod mutex;
 #[path = "runner/paging.rs"]
 mod paging;
+#[path = "runner/pci.rs"]
+mod pci;
 #[path = "runner/timer.rs"]
 mod timer;
 #[path = "runner/xhci.rs"]
@@ -151,10 +153,7 @@ extern "efiapi" fn efi_main(
             "context_words_use_the_specification_positions",
             xhci::context_words_use_the_specification_positions,
         ),
-        (
-            "pci_command_fields_are_named",
-            xhci::pci_command_fields_are_named,
-        ),
+        ("command_fields_are_named", pci::command_fields_are_named),
     ])
 }
 
