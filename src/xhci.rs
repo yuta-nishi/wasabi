@@ -9,6 +9,12 @@ use crate::mmio::Window;
 use crate::paging::PageTables;
 use crate::result::Result;
 use crate::timer;
+use crate::usb::control;
+use crate::usb::descriptor;
+use crate::usb::descriptor::ConfigurationDescriptor;
+use crate::usb::descriptor::DeviceDescriptor;
+use crate::usb::descriptor::EndpointDescriptor;
+use crate::usb::descriptor::InterfaceDescriptor;
 use alloc::vec::Vec;
 use core::mem::offset_of;
 use core::mem::size_of;
@@ -719,27 +725,6 @@ impl Ports {
     }
 }
 
-/// The 18-byte device descriptor (USB 2.0, 9.6.1).
-#[repr(C)]
-#[derive(Clone, Copy, Default)]
-struct DeviceDescriptor {
-    length: u8,
-    descriptor_type: u8,
-    usb_version: u16,
-    class: u8,
-    subclass: u8,
-    protocol: u8,
-    max_packet_size: u8,
-    vendor_id: u16,
-    product_id: u16,
-    device_version: u16,
-    manufacturer: u8,
-    product: u8,
-    serial_number: u8,
-    number_of_configurations: u8,
-}
-const _: () = assert!(core::mem::size_of::<DeviceDescriptor>() == 18);
-
 /// A device the controller has given an address to.
 struct Device {
     slot: u32,
@@ -1161,7 +1146,7 @@ impl HostController {
             descriptor.class,
             descriptor.number_of_configurations
         );
-        Ok(())
+        self.read_configuration(tables, slot).await
     }
 
     /// Keeps reading events and handles any port that changed while the OS runs.
@@ -1211,6 +1196,17 @@ impl HostController {
         self.attach_device(tables, port).await
     }
 
+    /// The bytes the controller wrote into a descriptor buffer.
+    ///
+    /// # Safety
+    ///
+    /// The buffer must be a page-aligned `IoBox` of at least `length` bytes that
+    /// the controller has finished writing.
+    unsafe fn descriptor_bytes(address: u64, length: usize) -> &'static [u8] {
+        // SAFETY: the caller guarantees the lifetime and the length.
+        unsafe { core::slice::from_raw_parts(address as *const u8, length) }
+    }
+
     /// Reads the device descriptor over endpoint 0.
     async fn read_device_descriptor(
         &mut self,
@@ -1218,14 +1214,90 @@ impl HostController {
         slot: u32,
     ) -> Result<DeviceDescriptor> {
         let buffer = IoBox::<[u8; 64]>::new(tables);
-        // GET_DESCRIPTOR: device to host, standard, device; type 1, index 0.
-        let request = 0x80u64 | 0x06u64 << 8 | 0x0100u64 << 16 | 18u64 << 48;
-        self.control_in(slot, request, buffer.address(), 18).await?;
-        // SAFETY: the controller wrote 18 bytes into the buffer, which is page
-        // aligned, and the descriptor only holds integers.
-        Ok(unsafe {
-            core::ptr::read_volatile(buffer.address() as *const DeviceDescriptor)
-        })
+        let length = DeviceDescriptor::LENGTH;
+        let request = control::get_descriptor(descriptor::DEVICE, 0, length as u16);
+        self.control_in(slot, request, buffer.address(), length as u32)
+            .await?;
+        // SAFETY: the transfer wrote `length` bytes into the buffer.
+        let bytes = unsafe { Self::descriptor_bytes(buffer.address(), length) };
+        DeviceDescriptor::from_bytes(bytes).ok_or("the device descriptor was too short")
+    }
+
+    /// Reads the configuration and logs the interfaces and endpoints it holds.
+    async fn read_configuration(
+        &mut self,
+        tables: &mut PageTables,
+        slot: u32,
+    ) -> Result<()> {
+        let buffer = IoBox::<[u8; 512]>::new(tables);
+        // The header says how long the whole configuration is.
+        let header_length = ConfigurationDescriptor::LENGTH;
+        let request =
+            control::get_descriptor(descriptor::CONFIGURATION, 0, header_length as u16);
+        self.control_in(slot, request, buffer.address(), header_length as u32)
+            .await?;
+        // SAFETY: the transfer wrote the header into the buffer.
+        let header = unsafe { Self::descriptor_bytes(buffer.address(), header_length) };
+        let configuration = ConfigurationDescriptor::from_bytes(header)
+            .ok_or("the configuration descriptor was too short")?;
+        let total_length = usize::from(configuration.total_length);
+        if total_length > 512 {
+            return Err("the configuration descriptor is larger than the buffer");
+        }
+
+        let request =
+            control::get_descriptor(descriptor::CONFIGURATION, 0, total_length as u16);
+        self.control_in(slot, request, buffer.address(), total_length as u32)
+            .await?;
+        // SAFETY: the transfer wrote the whole configuration into the buffer.
+        let bytes = unsafe { Self::descriptor_bytes(buffer.address(), total_length) };
+        info!(
+            "xhci: slot {slot} configuration {}: {} interface(s), {} bytes",
+            configuration.configuration_value,
+            configuration.number_of_interfaces,
+            configuration.total_length
+        );
+
+        // Each descriptor starts with its length and its type.
+        let mut offset = 0;
+        while offset + 2 <= total_length {
+            let length = usize::from(bytes[offset]);
+            if length == 0 || offset + length > total_length {
+                break;
+            }
+            let descriptor = &bytes[offset..offset + length];
+            match descriptor[1] {
+                descriptor::INTERFACE => {
+                    if let Some(interface) = InterfaceDescriptor::from_bytes(descriptor) {
+                        info!(
+                            "xhci: slot {slot} interface {}: class {}.{}.{}, {} endpoint(s)",
+                            interface.interface_number,
+                            interface.class,
+                            interface.subclass,
+                            interface.protocol,
+                            interface.number_of_endpoints
+                        );
+                    }
+                }
+                descriptor::ENDPOINT => {
+                    if let Some(endpoint) = EndpointDescriptor::from_bytes(descriptor) {
+                        info!(
+                            "xhci: slot {slot} endpoint {:#04x}: {}, {} bytes every {}",
+                            endpoint.address,
+                            transfer_type_name(
+                                endpoint.transfer_type(),
+                                endpoint.direction_in()
+                            ),
+                            endpoint.max_packet_size,
+                            endpoint.interval
+                        );
+                    }
+                }
+                _ => {}
+            }
+            offset += length;
+        }
+        Ok(())
     }
 
     /// Sends a control-IN transfer on endpoint 0 and waits for it to finish.
@@ -1343,6 +1415,19 @@ impl HostController {
             _input_context: input_context.memory,
         });
         Ok(())
+    }
+}
+
+/// What an endpoint's transfer type means (USB 2.0, 9.6.6, table 9-13).
+fn transfer_type_name(transfer_type: u8, direction_in: bool) -> &'static str {
+    match (transfer_type, direction_in) {
+        (0, _) => "control",
+        (1, true) => "isochronous IN",
+        (1, false) => "isochronous OUT",
+        (2, true) => "bulk IN",
+        (2, false) => "bulk OUT",
+        (3, true) => "interrupt IN",
+        _ => "interrupt OUT",
     }
 }
 
