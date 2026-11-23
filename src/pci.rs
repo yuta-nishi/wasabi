@@ -51,20 +51,21 @@ pub enum Bar {
     Io { address: u32, size: u32 },
 }
 
-/// The bus, device and function numbers that address one PCI function.
+/// The bus, device and function numbers that address one PCI function, the
+/// values the specification calls `BDF`.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub struct Address {
+pub struct BusDeviceFunction {
     bus: u8,
     device: u8,
     function: u8,
 }
 
-impl Address {
+impl BusDeviceFunction {
     /// Every function on the buses `start_bus..=end_bus`.
-    pub fn iter(start_bus: u8, end_bus: u8) -> impl Iterator<Item = Address> {
+    pub fn iter(start_bus: u8, end_bus: u8) -> impl Iterator<Item = BusDeviceFunction> {
         (u16::from(start_bus)..=u16::from(end_bus)).flat_map(|bus| {
             (0..32u8).flat_map(move |device| {
-                (0..8u8).map(move |function| Address {
+                (0..8u8).map(move |function| BusDeviceFunction {
                     bus: bus as u8,
                     device,
                     function,
@@ -81,7 +82,7 @@ impl Address {
     }
 }
 
-impl fmt::Display for Address {
+impl fmt::Display for BusDeviceFunction {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "{:02x}:{:02x}.{}", self.bus, self.device, self.function)
     }
@@ -116,49 +117,49 @@ impl ConfigSpace {
     }
 
     /// The addresses this window can reach.
-    pub fn addresses(&self) -> impl Iterator<Item = Address> {
-        Address::iter(self.start_bus, self.end_bus)
+    pub fn functions(&self) -> impl Iterator<Item = BusDeviceFunction> {
+        BusDeviceFunction::iter(self.start_bus, self.end_bus)
     }
 
-    fn register(&self, address: Address, offset: u16) -> usize {
+    fn register(&self, address: BusDeviceFunction, offset: u16) -> usize {
         self.base + address.offset() + usize::from(offset)
     }
 
     /// A 16-bit configuration register. Reads are volatile: the value comes from
     /// the device, not from memory the CPU may cache.
-    pub fn read_u16(&self, address: Address, offset: u16) -> u16 {
+    pub fn read_u16(&self, address: BusDeviceFunction, offset: u16) -> u16 {
         // SAFETY: ECAM entries are 4 KiB and offsets are even, so the address is
         // aligned and inside the window the firmware described.
         unsafe { read_volatile(self.register(address, offset) as *const u16) }
     }
 
     /// A 32-bit configuration register.
-    pub fn read_u32(&self, address: Address, offset: u16) -> u32 {
+    pub fn read_u32(&self, address: BusDeviceFunction, offset: u16) -> u32 {
         // SAFETY: as in `read_u16`; offsets are four-byte aligned.
         unsafe { read_volatile(self.register(address, offset) as *const u32) }
     }
 
     /// Writes a 16-bit configuration register.
-    pub fn write_u16(&self, address: Address, offset: u16, value: u16) {
+    pub fn write_u16(&self, address: BusDeviceFunction, offset: u16, value: u16) {
         // SAFETY: as in `read_u16`.
         unsafe { write_volatile(self.register(address, offset) as *mut u16, value) }
     }
 
     /// Writes a 32-bit configuration register.
-    pub fn write_u32(&self, address: Address, offset: u16, value: u32) {
+    pub fn write_u32(&self, address: BusDeviceFunction, offset: u16, value: u32) {
         // SAFETY: as in `read_u16`.
         unsafe { write_volatile(self.register(address, offset) as *mut u32, value) }
     }
 
     /// The command register (`0x04`): which spaces this function may decode and
     /// whether it may drive the bus by itself.
-    pub fn command(&self, address: Address) -> u16 {
+    pub fn command(&self, address: BusDeviceFunction) -> u16 {
         self.read_u16(address, offset_of!(Header, command) as u16)
     }
 
     /// Lets the function answer on its BAR window and start its own bus
     /// transactions. A device is deaf until both bits are set.
-    pub fn enable(&self, address: Address) {
+    pub fn enable(&self, address: BusDeviceFunction) {
         let mut command = Command::new(u32::from(self.command(address)));
         command.set_memory_space(1);
         command.set_bus_master(1);
@@ -170,7 +171,7 @@ impl ConfigSpace {
     }
 
     /// Vendor and device ID, or `None` when no function answers at `address`.
-    pub fn vendor_and_device(&self, address: Address) -> Option<(u16, u16)> {
+    pub fn vendor_and_device(&self, address: BusDeviceFunction) -> Option<(u16, u16)> {
         let vendor = self.read_u16(address, offset_of!(Header, vendor) as u16);
         if vendor == 0xffff {
             return None;
@@ -183,12 +184,12 @@ impl ConfigSpace {
 
     /// The programming interface byte (`0x09`): for a USB controller, `0x30`
     /// means xHCI, `0x20` EHCI, `0x10` OHCI and `0x00` UHCI.
-    pub fn programming_interface(&self, address: Address) -> u8 {
+    pub fn programming_interface(&self, address: BusDeviceFunction) -> u8 {
         ((self.read_u32(address, 0x08) >> 8) & 0xff) as u8
     }
 
     /// The class code and its subclass (header offset `0x0b` and `0x0a`).
-    pub fn class(&self, address: Address) -> (u8, u8) {
+    pub fn class(&self, address: BusDeviceFunction) -> (u8, u8) {
         let register = self.read_u32(address, offset_of!(Header, class) as u16);
         (
             ((register >> 24) & 0xff) as u8,
@@ -201,7 +202,7 @@ impl ConfigSpace {
     /// A BAR only holds the window's start address; the length lives nowhere, so
     /// it is measured by writing all ones and reading back which bits the
     /// function keeps, then restoring what was there.
-    pub fn bar(&self, address: Address, index: u8) -> Option<Bar> {
+    pub fn bar(&self, address: BusDeviceFunction, index: u8) -> Option<Bar> {
         let offset = offset_of!(Header, bar0) as u16 + u16::from(index) * BAR_STRIDE;
         let low = self.read_u32(address, offset);
         if low & 0b1 == 0b1 {
@@ -255,14 +256,14 @@ impl ConfigSpace {
     /// xHCI controller on the way: class `0c.03` (USB) with programming
     /// interface `0x30`, the byte that separates xHCI from the older EHCI
     /// (`0x20`), OHCI (`0x10`) and UHCI (`0x00`) controllers.
-    pub fn probe(&self) -> Option<Address> {
+    pub fn probe(&self) -> Option<BusDeviceFunction> {
         info!(
             "pci: ECAM at {:#018x} covering buses {:#04x}..={:#04x}",
             self.base, self.start_bus, self.end_bus
         );
         let mut found = 0;
         let mut xhci = None;
-        for address in self.addresses() {
+        for address in self.functions() {
             let Some((vendor, device)) = self.vendor_and_device(address) else {
                 continue;
             };

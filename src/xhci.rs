@@ -228,8 +228,8 @@ const MAX_SLOTS: usize = 256;
 /// Most scratchpad buffers the controller may report (the count is ten bits).
 const MAX_SCRATCHPAD: usize = 1023;
 
-/// A transfer request block: 16 bytes the controller and the driver hand to each
-/// other through a ring.
+/// A transfer request block (`TRB`): 16 bytes the controller and the driver hand
+/// to each other through a ring.
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 struct Trb {
@@ -354,12 +354,13 @@ impl Trb {
     }
 }
 
-/// One event ring segment table entry: where a segment is and how big it is.
+/// One entry of the event ring segment table (`ERST`): where a segment is and
+/// how many TRBs it holds.
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 struct ErstEntry {
-    base: u64,
-    size: u32,
+    ring_segment_base_address: u64,
+    ring_segment_size: u32,
     _reserved: u32,
 }
 
@@ -639,11 +640,11 @@ struct Device {
     slot: u32,
     port: u32,
     /// The endpoint 0 ring: control transfers go through it.
-    ep0: Ring<RING_TRBS>,
+    endpoint0_ring: Ring<RING_TRBS>,
     /// Where the controller keeps the device's contexts.
-    _context: IoBox<[u32; CONTEXT_WORDS]>,
+    _device_context: IoBox<[u32; CONTEXT_WORDS]>,
     /// The input context the device was addressed with.
-    _input: IoBox<[u32; CONTEXT_WORDS]>,
+    _input_context: IoBox<[u32; CONTEXT_WORDS]>,
 }
 
 /// The command ring and the doorbell that says it moved.
@@ -699,8 +700,8 @@ impl EventChannel {
             .write_slot(
                 0,
                 ErstEntry {
-                    base: self.ring.address(),
-                    size: RING_TRBS as u32,
+                    ring_segment_base_address: self.ring.address(),
+                    ring_segment_size: RING_TRBS as u32,
                     _reserved: 0,
                 },
             )
@@ -876,6 +877,8 @@ pub struct HostController {
     commands: CommandChannel,
     events: EventChannel,
     ports: Ports,
+    /// Device context base address array (`DCBAA`): where each slot's context
+    /// lives, and entry 0 the scratchpad buffers.
     dcbaa: IoBox<[u64; MAX_SLOTS]>,
     _scratchpad: Option<Scratchpad>,
     devices: Vec<Device>,
@@ -953,18 +956,18 @@ impl HostController {
             // Entry 0 of the device context array is where the controller looks
             // for the scratchpad buffers it needs for its own work.
             let mut buffers = IoBox::<[u64; MAX_SCRATCHPAD]>::new(tables);
-            let mut pages = Vec::new();
+            let mut scratchpad_buffers = Vec::new();
             for index in 0..scratchpad as usize {
-                let page = IoBox::<[u8; 4096]>::new(tables);
+                let buffer = IoBox::<[u8; 4096]>::new(tables);
                 buffers
-                    .write_slot(index, page.address())
+                    .write_slot(index, buffer.address())
                     .ok_or("the scratchpad array is full")?;
-                pages.push(page);
+                scratchpad_buffers.push(buffer);
             }
             self.dcbaa
                 .write_slot(0, buffers.address())
                 .ok_or("the device context array is full")?;
-            self._scratchpad = Some((buffers, pages));
+            self._scratchpad = Some((buffers, scratchpad_buffers));
         }
         self.registers
             .write_op64(offset_of!(Operational, dcbaap), self.dcbaa.address());
@@ -1039,7 +1042,7 @@ impl HostController {
                 "xhci: slot {} on port {} addressed, endpoint 0 ring at {:#018x}",
                 device.slot,
                 device.port,
-                device.ep0.address()
+                device.endpoint0_ring.address()
             );
         }
         Ok(())
@@ -1066,18 +1069,19 @@ impl HostController {
     ) -> Result<()> {
         let speed = self.ports.speed(port)?;
         let max_packet = speed.max_packet_size();
-        let ep0 = Ring::<RING_TRBS>::new(tables);
-        let mut input = InputContext::new(tables);
-        let context = IoBox::<[u32; CONTEXT_WORDS]>::new(tables);
+        let endpoint0 = Ring::<RING_TRBS>::new(tables);
+        let mut input_context = InputContext::new(tables);
+        let device_context = IoBox::<[u32; CONTEXT_WORDS]>::new(tables);
 
-        input.add_slot_and_endpoint0()?;
-        input.set_slot(speed, port)?;
-        input.set_endpoint0(max_packet, ep0.address())?;
+        input_context.add_slot_and_endpoint0()?;
+        input_context.set_slot(speed, port)?;
+        input_context.set_endpoint0(max_packet, endpoint0.address())?;
         self.dcbaa
-            .write_slot(slot as usize, context.address())
+            .write_slot(slot as usize, device_context.address())
             .ok_or("the device context array is full")?;
 
-        let trb = Trb::address_device(input.address(), slot, self.commands.cycle());
+        let trb =
+            Trb::address_device(input_context.address(), slot, self.commands.cycle());
         self.commands.send(&self.registers, trb)?;
         let event = self.events.wait_for_completion(&self.registers)?;
         if completion_code(&event) != CompletionCode::Success {
@@ -1085,7 +1089,7 @@ impl HostController {
         }
         // The controller writes the device context, and the slot context's last
         // word carries the address it assigned.
-        let slot_context = SlotContext3::new(context.read_slot(11).unwrap_or(0));
+        let slot_context = SlotContext3::new(device_context.read_slot(11).unwrap_or(0));
         info!(
             "xhci: slot {slot} has device address {}",
             slot_context.device_address()
@@ -1093,9 +1097,9 @@ impl HostController {
         self.devices.push(Device {
             slot,
             port,
-            ep0,
-            _context: context,
-            _input: input.memory,
+            endpoint0_ring: endpoint0,
+            _device_context: device_context,
+            _input_context: input_context.memory,
         });
         Ok(())
     }

@@ -1,6 +1,7 @@
 use crate::acpi::GenericAddress;
 use crate::acpi::Rsdp;
 use crate::acpi::TableHeader;
+use crate::bitfield;
 use crate::mutex::Mutex;
 use crate::result::Result;
 use core::future::Future;
@@ -10,14 +11,32 @@ use core::task::Context;
 use core::task::Poll;
 use core::time::Duration;
 
-/// Offset of the capability and ID register.
-const CAPABILITY: usize = 0x000;
-/// Offset of the general configuration register.
-const CONFIGURATION: usize = 0x010;
-/// Offset of the free-running main counter.
-const MAIN_COUNTER: usize = 0x0f0;
-/// Bit 0 of the configuration register enables the counter.
-const ENABLE: u64 = 1 << 0;
+/// The HPET's memory-mapped registers (IA-PC HPET specification 1.0, 2.3).
+#[repr(C)]
+struct HpetRegisters {
+    capability_and_id: u64,
+    _reserved008: u64,
+    configuration: u64,
+    _reserved018: [u64; 0x1b],
+    main_counter: u64,
+}
+const _: () = assert!(core::mem::offset_of!(HpetRegisters, capability_and_id) == 0x000);
+const _: () = assert!(core::mem::offset_of!(HpetRegisters, configuration) == 0x010);
+const _: () = assert!(core::mem::offset_of!(HpetRegisters, main_counter) == 0x0f0);
+
+bitfield! {
+    /// `GENERAL_CAPABILITIES_ID`: how fast the counter runs.
+    CapabilityAndId: u64 {
+        counter_clock_period: 63, 32,
+    }
+}
+
+bitfield! {
+    /// `GENERAL_CONFIGURATION`: whether the counter runs.
+    Configuration: u64 {
+        enable: 0, 0 -> set_enable,
+    }
+}
 
 /// `HPET` (ACPI 6.5, 5.2.25.15): where the timer registers live.
 #[repr(C, packed)]
@@ -56,15 +75,25 @@ impl Hpet {
         // The upper half of the capability register is COUNTER_CLK_PERIOD; the
         // lower half only describes the device (revision, comparators, vendor).
         let capability = unsafe {
-            read_volatile((self.base as *const u8).add(CAPABILITY) as *const u64)
+            read_volatile(
+                (self.base as *const u8)
+                    .add(core::mem::offset_of!(HpetRegisters, capability_and_id))
+                    as *const u64,
+            )
         };
-        capability >> 32
+        CapabilityAndId::new(capability).counter_clock_period()
     }
 
     /// Ticks of the free-running main counter.
     fn ticks(&self) -> u64 {
         // SAFETY: `self.base` points at the HPET's memory-mapped registers.
-        unsafe { read_volatile((self.base as *const u8).add(MAIN_COUNTER) as *const u64) }
+        unsafe {
+            read_volatile(
+                (self.base as *const u8)
+                    .add(core::mem::offset_of!(HpetRegisters, main_counter))
+                    as *const u64,
+            )
+        }
     }
 
     /// Nanoseconds, counted from whenever the counter started.
@@ -87,9 +116,12 @@ pub unsafe fn init(base: u64) -> Result<()> {
         return Err("the HPET reports a zero period");
     }
     unsafe {
-        let configuration = (base as *const u8).add(CONFIGURATION) as *mut u64;
-        let value = read_volatile(configuration);
-        core::ptr::write_volatile(configuration, value | ENABLE);
+        let configuration = (base as *const u8)
+            .add(core::mem::offset_of!(HpetRegisters, configuration))
+            as *mut u64;
+        let mut value = Configuration::new(read_volatile(configuration));
+        value.set_enable(1);
+        core::ptr::write_volatile(configuration, value.raw());
     }
     *HPET.lock() = Some(hpet);
     Ok(())
