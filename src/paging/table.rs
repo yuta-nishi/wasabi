@@ -1,3 +1,4 @@
+use crate::bitfield;
 use crate::x86::read_cr3;
 use crate::x86::write_cr3;
 use alloc::boxed::Box;
@@ -5,8 +6,40 @@ use alloc::vec::Vec;
 use core::arch::asm;
 use core::pin::Pin;
 
-/// Bits 12..51 of an entry hold the physical address of the next level.
-pub(super) const ADDRESS_MASK: u64 = 0x000f_ffff_ffff_f000;
+bitfield! {
+    /// A page table entry (Intel SDM 4.5).
+    EntryFlags: u64 {
+        present: 0, 0 -> set_present,
+        writable: 1, 1 -> set_writable,
+        no_cache: 4, 4 -> set_no_cache,
+        huge: 7, 7 -> set_huge,
+        address: 51, 12 -> set_address,
+    }
+}
+
+impl EntryFlags {
+    /// A present, writable mapping of `physical`.
+    fn mapping(physical: u64) -> Self {
+        let mut flags = Self::new(0);
+        flags.set_present(1);
+        flags.set_writable(1);
+        flags.set_address(physical >> 12);
+        flags
+    }
+
+    /// The same mapping, with reads and writes going to the device.
+    fn uncached(physical: u64) -> Self {
+        let mut flags = Self::mapping(physical);
+        flags.set_no_cache(1);
+        flags
+    }
+
+    /// The physical address this entry maps.
+    pub(super) const fn physical(self) -> u64 {
+        self.address() << 12
+    }
+}
+
 pub(super) const ENTRIES: usize = 512;
 
 /// 4 KiB (`1 << 12`): the unit a page table maps, and therefore the size of one
@@ -17,14 +50,6 @@ const PAGE_OFFSET_MASK: u64 = PAGE_SIZE - 1;
 /// A 2 MiB page: one PD entry that maps a whole frame instead of pointing at a
 /// table of 4 KiB pages.
 pub const HUGE_PAGE_SIZE: u64 = 0x20_0000;
-/// Bit 7 of a PD or PDPT entry: the entry maps a page itself.
-const HUGE: u64 = 1 << 7;
-/// Present: the entry maps something.
-const PRESENT: u64 = 1 << 0;
-/// Writable: writes are allowed through this entry.
-const WRITABLE: u64 = 1 << 1;
-/// Page cache disable: reads and writes always go to the device.
-pub const NO_CACHE: u64 = 1 << 4;
 
 /// One page of entries. It must be page aligned: its address is stored in the
 /// high bits of the entry that points at it, so a misaligned table would put
@@ -60,14 +85,14 @@ impl Entry {
         self.0
     }
     pub const fn present(self) -> bool {
-        self.0 & PRESENT != 0
+        EntryFlags::new(self.0).present() != 0
     }
     pub const fn huge(self) -> bool {
-        self.0 & (1 << 7) != 0
+        EntryFlags::new(self.0).huge() != 0
     }
     /// The physical address of the next table, or of the frame this entry maps.
     pub const fn address(self) -> u64 {
-        self.0 & ADDRESS_MASK
+        EntryFlags::new(self.0).physical()
     }
 }
 
@@ -152,7 +177,7 @@ pub fn translate_in(root: &[Entry], address: u64) -> Translation {
             let physical = entry.address() + (address & PAGE_OFFSET_MASK);
             return Translation::Page(steps, physical);
         }
-        table = next(entry);
+        table = next_table(entry);
     }
     unreachable!("the walk always ends at the PT level");
 }
@@ -229,18 +254,21 @@ impl PageTables {
             "physical address alignment"
         );
         let (table, index) = self
-            .pd_and_index(virtual_address, true)
+            .page_directory_and_index(virtual_address, true)
             .expect("PD allocated");
         // SAFETY: `table` points at the PD `pd_and_index` just returned.
         unsafe {
-            (*table).entries_mut()[index] =
-                Entry::from_raw(physical_address | PRESENT | WRITABLE | HUGE)
+            (*table).entries_mut()[index] = Entry::from_raw({
+                let mut flags = EntryFlags::mapping(physical_address);
+                flags.set_huge(1);
+                flags.raw()
+            })
         };
     }
 
     /// Maps one page, allocating the tables on the way down.
     pub fn map_page(&mut self, virtual_address: u64, physical_address: u64) {
-        self.map_page_with(virtual_address, physical_address, PRESENT | WRITABLE);
+        self.map_page_with(virtual_address, EntryFlags::mapping(physical_address));
     }
 
     /// Maps `length` bytes from `virtual_address` uncached, whether or not they
@@ -259,11 +287,7 @@ impl PageTables {
     /// The cache-disable bit matters here: a cached read of a device register
     /// returns the old value instead of asking the device again.
     pub fn map_page_uncached(&mut self, virtual_address: u64, physical_address: u64) {
-        self.map_page_with(
-            virtual_address,
-            physical_address,
-            PRESENT | WRITABLE | NO_CACHE,
-        );
+        self.map_page_with(virtual_address, EntryFlags::uncached(physical_address));
     }
 
     /// # Invalidation
@@ -272,28 +296,22 @@ impl PageTables {
     /// the CPU may keep translating through the old attributes until the entry
     /// is flushed. Newly mapped pages need no flush, because a translation the
     /// CPU never made is not cached.
-    fn map_page_with(&mut self, virtual_address: u64, physical_address: u64, flags: u64) {
+    fn map_page_with(&mut self, virtual_address: u64, flags: EntryFlags) {
         assert_eq!(virtual_address % PAGE_SIZE, 0, "virtual address alignment");
-        assert_eq!(
-            physical_address % PAGE_SIZE,
-            0,
-            "physical address alignment"
-        );
 
         let (table, index) = self
-            .pt_and_index(virtual_address, true)
+            .page_table_and_index(virtual_address, true)
             .expect("walking with allocation always reaches a PT");
         // SAFETY: `table` points at the PT `pt_and_index` just returned.
-        unsafe {
-            (*table).entries_mut()[index] = Entry::from_raw(physical_address | flags)
-        };
+        unsafe { (*table).entries_mut()[index] = Entry::from_raw(flags.raw()) };
     }
 
     /// Clears the mapping for one page, so touching it faults.
     pub fn unmap_page(&mut self, virtual_address: u64) {
         assert_eq!(virtual_address % PAGE_SIZE, 0, "virtual address alignment");
 
-        let Some((table, index)) = self.pt_and_index(virtual_address, false) else {
+        let Some((table, index)) = self.page_table_and_index(virtual_address, false)
+        else {
             return;
         };
         // SAFETY: `table` points at the PT that holds this page.
@@ -301,7 +319,7 @@ impl PageTables {
     }
 
     /// Walks to the PD that holds `address`, for a 2 MiB page.
-    fn pd_and_index(
+    fn page_directory_and_index(
         &mut self,
         address: u64,
         allocate: bool,
@@ -316,7 +334,7 @@ impl PageTables {
                     return None;
                 }
                 let next = Box::into_raw(Table::zeroed());
-                *entry = Entry::from_raw(next as u64 | PRESENT | WRITABLE);
+                *entry = Entry::from_raw(EntryFlags::mapping(next as u64).raw());
             }
             table = entry.address() as *mut Table;
         }
@@ -329,7 +347,7 @@ impl PageTables {
     ///
     /// Every translation in the 2 MiB range changes, so all of them are dropped.
     fn split_huge_page(&mut self, address: u64) -> bool {
-        let Some((table, index)) = self.pd_and_index(address, false) else {
+        let Some((table, index)) = self.page_directory_and_index(address, false) else {
             return false;
         };
         // SAFETY: `table` points at the PD that holds this entry.
@@ -339,14 +357,20 @@ impl PageTables {
         }
         // Attributes stay; the PS bit moves from the PD entry to a table pointer,
         // and in a 4 KiB entry bit 7 means PAT, so it must not survive there.
-        let flags = entry.raw() & !ADDRESS_MASK & !HUGE;
+        let original = EntryFlags::new(entry.raw());
         let base = entry.address();
         let mut pages = Table::zeroed();
         for (index, page) in pages.entries_mut().iter_mut().enumerate() {
-            *page = Entry::from_raw((base + (index as u64) * PAGE_SIZE) | flags);
+            let mut flags = original;
+            flags.set_huge(0);
+            flags.set_address((base + (index as u64) * PAGE_SIZE) >> 12);
+            *page = Entry::from_raw(flags.raw());
         }
         let pages = Box::into_raw(pages);
-        *entry = Entry::from_raw(pages as u64 | PRESENT | WRITABLE);
+        let mut table_flags = original;
+        table_flags.set_huge(0);
+        table_flags.set_address(pages as u64 >> 12);
+        *entry = Entry::from_raw(table_flags.raw());
         let start = address & !(HUGE_PAGE_SIZE - 1);
         for page in 0..HUGE_PAGE_SIZE / PAGE_SIZE {
             invalidate_page(start + page * PAGE_SIZE);
@@ -356,7 +380,7 @@ impl PageTables {
 
     /// Walks down to the PT that holds `address`, allocating missing levels
     /// when `allocate` is set, and returns that table with the entry index.
-    fn pt_and_index(
+    fn page_table_and_index(
         &mut self,
         address: u64,
         allocate: bool,
@@ -371,7 +395,7 @@ impl PageTables {
                     return None;
                 }
                 let next = Box::into_raw(Table::zeroed());
-                *entry = Entry::from_raw(next as u64 | PRESENT | WRITABLE);
+                *entry = Entry::from_raw(EntryFlags::mapping(next as u64).raw());
             } else if level == Level::Pd && entry.huge() {
                 self.split_huge_page(address);
             }
@@ -394,12 +418,12 @@ impl PageTables {
 }
 
 pub(super) fn root() -> &'static [Entry] {
-    let address = (read_cr3() & ADDRESS_MASK) as *const Entry;
+    let address = EntryFlags::new(read_cr3()).physical() as *const Entry;
     // SAFETY: CR3 points at the PML4 the CPU is currently using.
     unsafe { core::slice::from_raw_parts(address, ENTRIES) }
 }
 
-fn next(entry: Entry) -> &'static [Entry] {
+fn next_table(entry: Entry) -> &'static [Entry] {
     let address = entry.address() as *const Entry;
     // SAFETY: a present entry without PS points at the next level.
     unsafe { core::slice::from_raw_parts(address, ENTRIES) }

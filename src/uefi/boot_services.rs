@@ -1,7 +1,7 @@
 use super::ffi::EfiGuid;
 use super::ffi::EfiHandle;
 use super::ffi::EfiStatus;
-use super::ffi::Out;
+use super::ffi::OutputParameter;
 use super::memory_map::MemoryMapHolder;
 use crate::acpi::Rsdp;
 use crate::result::Result;
@@ -47,7 +47,7 @@ type ExitBootServicesFn =
 type HandleProtocolFn = extern "efiapi" fn(
     handle: EfiHandle,
     protocol: *const EfiGuid,
-    out_interface: Out<*mut c_void>,
+    out_interface: OutputParameter<*mut c_void>,
 ) -> EfiStatus;
 
 /// `EFI_BOOT_SERVICES.LocateProtocol` (UEFI spec 7.3.16).
@@ -57,7 +57,7 @@ type HandleProtocolFn = extern "efiapi" fn(
 type LocateProtocolFn = extern "efiapi" fn(
     protocol: *const EfiGuid,
     registration: *mut c_void,
-    out_interface: Out<*mut c_void>,
+    out_interface: OutputParameter<*mut c_void>,
 ) -> EfiStatus;
 
 #[repr(C)]
@@ -101,8 +101,11 @@ impl EfiBootServicesTable {
     ) -> Option<&'a T> {
         let mut out: *mut T = null_mut();
         let handle_protocol_fn = self.handle_protocol_fn;
-        let status =
-            handle_protocol_fn(handle, protocol, &raw mut out as Out<*mut c_void>);
+        let status = handle_protocol_fn(
+            handle,
+            protocol,
+            &raw mut out as OutputParameter<*mut c_void>,
+        );
         if status != EfiStatus::Success {
             return None;
         }
@@ -123,8 +126,11 @@ impl EfiBootServicesTable {
     ) -> Option<&'a T> {
         let mut out: *mut T = null_mut();
         let locate_protocol_fn = self.locate_protocol_fn;
-        let status =
-            locate_protocol_fn(protocol, null_mut(), &raw mut out as Out<*mut c_void>);
+        let status = locate_protocol_fn(
+            protocol,
+            null_mut(),
+            &raw mut out as OutputParameter<*mut c_void>,
+        );
         if status != EfiStatus::Success {
             return None;
         }

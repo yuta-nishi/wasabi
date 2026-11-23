@@ -32,7 +32,7 @@ impl<T> Mutex<T> {
     /// this lock while the interrupted task holds it could never release it, so
     /// the task would spin forever.
     pub fn lock(&self) -> MutexGuard<'_, T> {
-        let interrupts = disable_interrupts();
+        let saved_flags = disable_interrupts();
         while self
             .locked
             .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
@@ -42,7 +42,7 @@ impl<T> Mutex<T> {
         }
         MutexGuard {
             mutex: self,
-            interrupts,
+            saved_flags,
         }
     }
 }
@@ -64,7 +64,7 @@ pub struct MutexGuard<'a, T> {
     /// through it. This reference is what ties the guard's life to the lock.
     mutex: &'a Mutex<T>,
     /// The interrupt flag to put back when the guard goes away.
-    interrupts: u64,
+    saved_flags: u64,
 }
 
 impl<T> Deref for MutexGuard<'_, T> {
@@ -89,6 +89,6 @@ impl<T> Drop for MutexGuard<'_, T> {
     fn drop(&mut self) {
         self.mutex.locked.store(false, Ordering::Release);
         // SAFETY: `interrupts` came from `disable_interrupts` in `lock`.
-        unsafe { restore_interrupts(self.interrupts) };
+        unsafe { restore_interrupts(self.saved_flags) };
     }
 }

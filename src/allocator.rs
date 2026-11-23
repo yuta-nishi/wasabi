@@ -16,10 +16,10 @@ use core::ptr::null_mut;
 
 /// Rounds `v` up to a power of two: exact powers stay put, while `0` and
 /// values too large to represent are rejected.
-pub fn round_up_to_nearest_pow2(v: usize) -> Result<usize> {
-    // `v - 1` keeps exact powers of two unchanged; `checked_shl` then rejects
-    // both `v == 0` and shift counts that do not fit in a `usize`.
-    let exponent = usize::BITS - v.wrapping_sub(1).leading_zeros();
+pub fn round_up_to_nearest_pow2(value: usize) -> Result<usize> {
+    // `value - 1` keeps exact powers of two unchanged; `checked_shl` then rejects
+    // both zero and shift counts that do not fit in a `usize`.
+    let exponent = usize::BITS - value.wrapping_sub(1).leading_zeros();
     1usize.checked_shl(exponent).ok_or("Out of range")
 }
 
@@ -189,11 +189,11 @@ impl FirstFitAllocator {
 
     /// Adds every conventional-memory region of `memory_map` to the free list.
     pub fn init_with_mmap(&self, memory_map: &MemoryMapHolder) {
-        for e in memory_map.iter() {
-            if e.memory_type() != EfiMemoryType::CONVENTIONAL_MEMORY {
+        for descriptor in memory_map.iter() {
+            if descriptor.memory_type() != EfiMemoryType::CONVENTIONAL_MEMORY {
                 continue;
             }
-            self.add_free_from_descriptor(e);
+            self.add_free_from_descriptor(descriptor);
         }
     }
 

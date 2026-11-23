@@ -43,7 +43,10 @@ impl MemoryMapHolder {
         }
     }
     pub fn iter(&self) -> MemoryMapIterator<'_> {
-        MemoryMapIterator { map: self, ofs: 0 }
+        MemoryMapIterator {
+            map: self,
+            offset: 0,
+        }
     }
 }
 impl Default for MemoryMapHolder {
@@ -54,21 +57,21 @@ impl Default for MemoryMapHolder {
 
 pub struct MemoryMapIterator<'a> {
     map: &'a MemoryMapHolder,
-    ofs: usize,
+    offset: usize,
 }
 impl<'a> Iterator for MemoryMapIterator<'a> {
     type Item = &'a EfiMemoryDescriptor;
     fn next(&mut self) -> Option<&'a EfiMemoryDescriptor> {
-        if self.ofs >= self.map.memory_map_size {
+        if self.offset >= self.map.memory_map_size {
             None
         } else {
             // SAFETY: `ofs` stays inside the buffer because it is advanced by
             // `descriptor_size` until it reaches `memory_map_size`.
             let e: &EfiMemoryDescriptor = unsafe {
-                &*(self.map.memory_map_buffer.as_ptr().add(self.ofs)
+                &*(self.map.memory_map_buffer.as_ptr().add(self.offset)
                     as *const EfiMemoryDescriptor)
             };
-            self.ofs += self.map.descriptor_size;
+            self.offset += self.map.descriptor_size;
             Some(e)
         }
     }

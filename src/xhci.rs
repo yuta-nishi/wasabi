@@ -1,3 +1,4 @@
+use crate::bitfield;
 use crate::info;
 use crate::iobox::IoBox;
 use crate::iobox::Zeroable;
@@ -6,66 +7,218 @@ use crate::mmio::Window;
 use crate::paging::PageTables;
 use crate::result::Result;
 use crate::timer;
+use alloc::vec::Vec;
+use core::mem::offset_of;
+use core::mem::size_of;
 
-/// Generic capability register offsets.
-const CAPLENGTH: usize = 0x00;
-const HCSPARAMS1: usize = 0x04;
-const HCSPARAMS2: usize = 0x08;
-const HCCPARAMS1: usize = 0x10;
-const DBOFF: usize = 0x14;
-const RTSOFF: usize = 0x18;
+/// The capability registers, starting at the window's first byte.
+#[repr(C)]
+struct Capability {
+    caplength_and_version: u32,
+    hcsparams1: u32,
+    hcsparams2: u32,
+    hcsparams3: u32,
+    hccparams1: u32,
+    dboff: u32,
+    rtsoff: u32,
+    hccparams2: u32,
+}
 
-/// Operational register offsets, relative to `CAPLENGTH`.
-const USBCMD: usize = 0x00;
-const USBSTS: usize = 0x04;
-const PAGESIZE: usize = 0x08;
-const CRCR: usize = 0x18;
-const DCBAAP: usize = 0x30;
-const CONFIG: usize = 0x38;
+/// The operational registers, starting at `CAPLENGTH`.
+#[repr(C)]
+struct Operational {
+    usbcmd: u32,
+    usbsts: u32,
+    pagesize: u32,
+    _reserved0c: u32,
+    dnctrl: u32,
+    _reserved10: u32,
+    crcr: u64,
+    _reserved20: [u32; 4],
+    dcbaap: u64,
+    config: u32,
+    _reserved3c: u32,
+}
+const _: () = assert!(offset_of!(Capability, hcsparams1) == 0x04);
+const _: () = assert!(offset_of!(Capability, hccparams1) == 0x10);
+const _: () = assert!(offset_of!(Capability, dboff) == 0x14);
+const _: () = assert!(offset_of!(Capability, rtsoff) == 0x18);
+const _: () = assert!(size_of::<Operational>() == 0x40);
+const _: () = assert!(offset_of!(Operational, crcr) == 0x18);
+const _: () = assert!(offset_of!(Operational, dcbaap) == 0x30);
+const _: () = assert!(offset_of!(Operational, config) == 0x38);
 
-/// Port register set, relative to `CAPLENGTH`; each port owns 0x10 bytes.
+/// One interrupter's runtime registers.
+#[repr(C)]
+struct Interrupter {
+    iman: u32,
+    imod: u32,
+    erstsz: u32,
+    _reserved0c: u32,
+    erstba: u64,
+    erdp: u64,
+}
+
+/// The runtime registers: a microframe counter, then the interrupters.
+#[repr(C)]
+struct Runtime {
+    microframe_index: u32,
+    _reserved: [u32; 7],
+    interrupter0: Interrupter,
+}
+const _: () = assert!(offset_of!(Runtime, interrupter0) == 0x20);
+const _: () = assert!(offset_of!(Interrupter, erstsz) == 0x08);
+const _: () = assert!(offset_of!(Interrupter, erstba) == 0x10);
+const _: () = assert!(offset_of!(Interrupter, erdp) == 0x18);
+
+/// Where the port register set starts, relative to `CAPLENGTH`.
 const PORT_REGISTERS: usize = 0x400;
-const PORT_SIZE: usize = 0x10;
-/// PORTSC: a device is attached (`CCS`) and the port is enabled (`PED`).
-const PORTSC_CONNECTED: u32 = 1 << 0;
-const PORTSC_ENABLED: u32 = 1 << 1;
-/// PORTSC: writing 1 starts a reset (`PR`).
-const PORTSC_RESET: u32 = 1 << 4;
-/// PORTSC: change bits, cleared by writing 1.
-const PORTSC_CONNECT_CHANGED: u32 = 1 << 17;
-const PORTSC_RESET_CHANGED: u32 = 1 << 21;
-const PORTSC_CHANGES: u32 = PORTSC_CONNECT_CHANGED
-    | PORTSC_RESET_CHANGED
-    | (1 << 18)
-    | (1 << 19)
-    | (1 << 20)
-    | (1 << 22)
-    | (1 << 23);
+/// One port's register set.
+#[repr(C)]
+struct Port {
+    portsc: u32,
+    portpmsc: u32,
+    portli: u32,
+    porthlpmc: u32,
+}
+const _: () = assert!(size_of::<Port>() == 0x10);
 
-/// `Enable Slot` (TRB type 9): the controller picks a slot for a device.
-const TRB_ENABLE_SLOT: u32 = 9;
-/// `Address Device` (TRB type 11): the controller gives the device an address
-/// and allocates the endpoints its input context describes.
-const TRB_ADDRESS_DEVICE: u32 = 11;
+bitfield! {
+    /// `USBCMD`: whether the controller runs, and whether it is reset.
+    UsbCmd: u32 {
+        run: 0, 0 -> set_run,
+        reset: 1, 1 -> set_reset,
+    }
+}
+
+bitfield! {
+    /// `USBSTS`: what the controller is doing.
+    UsbSts: u32 {
+        halted: 0, 0,
+        not_ready: 11, 11,
+    }
+}
+
+bitfield! {
+    /// `HCCPARAMS1`: what the controller supports.
+    HccParams1: u32 {
+        context_size: 2, 2,
+    }
+}
+
+bitfield! {
+    /// `PORTSC`: a port's status and control word.
+    Portsc: u32 {
+        connected: 0, 0,
+        enabled: 1, 1,
+        reset: 4, 4,
+        link_state: 8, 5,
+        power: 9, 9,
+        speed: 13, 10,
+        connect_changed: 17, 17,
+        reset_changed: 21, 21,
+    }
+}
+
+impl Portsc {
+    /// The change bits: writing 1 to one clears it.
+    fn changes() -> u32 {
+        Self::mask(17, 17)
+            | Self::mask(18, 18)
+            | Self::mask(19, 19)
+            | Self::mask(20, 20)
+            | Self::mask(21, 21)
+            | Self::mask(22, 22)
+            | Self::mask(23, 23)
+    }
+
+    /// Asks the controller to reset the port.
+    fn request_reset(&mut self) {
+        self.set_raw(self.raw() | Self::mask(4, 4) | Self::mask(17, 17));
+    }
+
+    /// Clears every change bit that is set.
+    fn acknowledge_changes(&mut self) {
+        self.set_raw(self.raw() | Self::changes());
+    }
+}
+
+/// The speed a port reports, as the slot context wants it (protocol speed ID).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Speed {
+    Full,
+    Low,
+    High,
+    Super,
+}
+
+impl Speed {
+    pub fn from_portsc(raw: u32) -> Option<Self> {
+        match raw {
+            1 => Some(Self::Full),
+            2 => Some(Self::Low),
+            3 => Some(Self::High),
+            4 => Some(Self::Super),
+            _ => None,
+        }
+    }
+
+    /// The value the slot context carries.
+    pub fn psi(self) -> u32 {
+        match self {
+            Self::Full => 1,
+            Self::Low => 2,
+            Self::High => 3,
+            Self::Super => 4,
+        }
+    }
+
+    /// The largest control packet at this speed.
+    pub fn max_packet_size(self) -> u16 {
+        match self {
+            Self::Full | Self::Low => 8,
+            Self::High => 64,
+            Self::Super => 512,
+        }
+    }
+}
+
+/// The code a completion event carries (xHCI specification, table 6-96).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum CompletionCode {
+    Success,
+    TrbError,
+    SlotNotEnabled,
+    EndpointNotEnabled,
+    ParameterError,
+    ContextStateError,
+    EventRingFull,
+    CommandRingStopped,
+    CommandAborted,
+    Other(u32),
+}
+
+impl CompletionCode {
+    pub fn from_raw(raw: u32) -> Self {
+        match raw {
+            1 => Self::Success,
+            5 => Self::TrbError,
+            11 => Self::SlotNotEnabled,
+            12 => Self::EndpointNotEnabled,
+            17 => Self::ParameterError,
+            19 => Self::ContextStateError,
+            21 => Self::EventRingFull,
+            24 => Self::CommandRingStopped,
+            25 => Self::CommandAborted,
+            other => Self::Other(other),
+        }
+    }
+}
 
 /// 32-byte contexts: one slot context, one endpoint context per endpoint.
 const CONTEXT_SIZE: usize = 0x20;
 /// Words in a page of contexts.
-const CONTEXT_WORDS: usize = 1024;
-/// `HCCPARAMS1`: context size, 0 for 32 bytes and 1 for 64.
-const HCC_CONTEXT_SIZE: u32 = 1 << 2;
-
-/// Runtime registers of interrupter 0, relative to `RTSOFF`.
-const INTERRUPTER0: usize = 0x20;
-const ERSTSZ: usize = 0x08;
-const ERSTBA: usize = 0x10;
-const ERDP: usize = 0x18;
-
-const USBCMD_RUN: u32 = 1 << 0;
-const USBCMD_RESET: u32 = 1 << 1;
-const USBSTS_HALTED: u32 = 1 << 0;
-const USBSTS_NOT_READY: u32 = 1 << 11;
-
+const CONTEXT_WORDS: usize = crate::paging::PAGE_SIZE as usize / 4;
 /// How long to wait for the controller to reach a state, in milliseconds.
 const TIMEOUT_MS: u64 = 100;
 /// TRBs in the command ring and in the event ring segment.
@@ -75,8 +228,8 @@ const MAX_SLOTS: usize = 256;
 /// Most scratchpad buffers the controller may report (the count is ten bits).
 const MAX_SCRATCHPAD: usize = 1023;
 
-/// A transfer request block: 16 bytes the controller and the driver hand to each
-/// other through a ring.
+/// A transfer request block (`TRB`): 16 bytes the controller and the driver hand
+/// to each other through a ring.
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 struct Trb {
@@ -88,36 +241,83 @@ struct Trb {
 // SAFETY: a TRB is four integers, so every bit pattern is valid.
 unsafe impl Zeroable for Trb {}
 
-/// `No Op Command` (TRB type 23; type 8 is the transfer-ring `No Op`): the
-/// controller completes it without doing anything, which makes it a check that
-/// the rings work.
-const TRB_NO_OP_COMMAND: u32 = 23;
-/// `Link` (TRB type 6): jumps back to the start of the ring.
-const TRB_LINK: u32 = 6;
-/// `Command Completion Event` (TRB type 33): the controller's answer to a command.
-const TRB_COMMAND_COMPLETION: u32 = 33;
-/// `Port Status Change Event` (TRB type 34): a port changed on its own.
-const TRB_PORT_STATUS_CHANGE: u32 = 34;
-/// Completion code 1: success.
-const COMPLETION_SUCCESS: u32 = 1;
-
-fn trb_type(trb: &Trb) -> u32 {
-    (trb.control >> 10) & 0x3f
+/// What a TRB asks for or reports (xHCI specification, table 6-91).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum TrbType {
+    SetupStage,
+    DataStage,
+    StatusStage,
+    Link,
+    EnableSlot,
+    AddressDevice,
+    NoOpCommand,
+    TransferEvent,
+    CommandCompletion,
+    PortStatusChange,
+    Other(u32),
 }
 
-fn completion_code(trb: &Trb) -> u32 {
-    (trb.status >> 24) & 0xff
+impl TrbType {
+    fn raw(self) -> u32 {
+        match self {
+            Self::SetupStage => 2,
+            Self::DataStage => 3,
+            Self::StatusStage => 4,
+            Self::Link => 6,
+            Self::EnableSlot => 9,
+            Self::AddressDevice => 11,
+            Self::NoOpCommand => 23,
+            Self::TransferEvent => 32,
+            Self::CommandCompletion => 33,
+            Self::PortStatusChange => 34,
+            Self::Other(raw) => raw,
+        }
+    }
+
+    pub fn from_raw(raw: u32) -> Self {
+        match raw {
+            2 => Self::SetupStage,
+            3 => Self::DataStage,
+            4 => Self::StatusStage,
+            6 => Self::Link,
+            9 => Self::EnableSlot,
+            11 => Self::AddressDevice,
+            23 => Self::NoOpCommand,
+            32 => Self::TransferEvent,
+            33 => Self::CommandCompletion,
+            34 => Self::PortStatusChange,
+            other => Self::Other(other),
+        }
+    }
+}
+
+bitfield! {
+    /// The control dword of a TRB: what kind it is and which lap it belongs to.
+    TrbControl: u32 {
+        cycle: 0, 0,
+        link_toggle: 1, 1,
+        trb_type: 15, 10,
+        slot: 31, 24,
+    }
+}
+
+fn trb_type(trb: &Trb) -> TrbType {
+    TrbType::from_raw(TrbControl::new(trb.control).trb_type())
+}
+
+fn completion_code(trb: &Trb) -> CompletionCode {
+    CompletionCode::from_raw((trb.status >> 24) & 0xff)
 }
 
 /// The slot a completion event was about.
 fn slot_id(trb: &Trb) -> u32 {
-    trb.control >> 24
+    TrbControl::new(trb.control).slot()
 }
 
 impl Trb {
     fn no_op_command(cycle: bool) -> Self {
         Self {
-            control: (TRB_NO_OP_COMMAND << 10) | u32::from(cycle),
+            control: (TrbType::NoOpCommand.raw() << 10) | u32::from(cycle),
             ..Self::default()
         }
     }
@@ -127,14 +327,18 @@ impl Trb {
         Self {
             parameter: input,
             status: 0,
-            control: (TRB_ADDRESS_DEVICE << 10) | (slot << 24) | u32::from(cycle),
+            control: (TrbType::AddressDevice.raw() << 10)
+                | (slot << 24)
+                | u32::from(cycle),
         }
     }
 
     /// `Enable Slot`: the controller answers with the slot it picked.
     fn enable_slot(cycle: bool, slot_type: u32) -> Self {
         Self {
-            control: (TRB_ENABLE_SLOT << 10) | (slot_type << 16) | u32::from(cycle),
+            control: (TrbType::EnableSlot.raw() << 10)
+                | (slot_type << 16)
+                | u32::from(cycle),
             ..Self::default()
         }
     }
@@ -145,17 +349,18 @@ impl Trb {
         Self {
             parameter: ring,
             status: 0,
-            control: (TRB_LINK << 10) | (1 << 1) | u32::from(cycle),
+            control: (TrbType::Link.raw() << 10) | (1 << 1) | u32::from(cycle),
         }
     }
 }
 
-/// One event ring segment table entry: where a segment is and how big it is.
+/// One entry of the event ring segment table (`ERST`): where a segment is and
+/// how many TRBs it holds.
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 struct ErstEntry {
-    base: u64,
-    size: u32,
+    ring_segment_base_address: u64,
+    ring_segment_size: u32,
     _reserved: u32,
 }
 
@@ -167,6 +372,7 @@ unsafe impl Zeroable for ErstEntry {}
 /// The capability registers start the window, the operational registers sit at
 /// `CAPLENGTH`, the runtime registers at `RTSOFF`, and the doorbell array at
 /// `DBOFF`; the controller reports all three offsets itself.
+#[derive(Clone, Copy)]
 pub struct Registers {
     window: Window,
     caplength: u64,
@@ -180,12 +386,16 @@ impl Registers {
         // SAFETY: `window` is the controller's register window, mapped uncached
         // by the caller.
         let window = unsafe { Window::new(window) };
-        let caplength = u64::from(window.at::<u8>(CAPLENGTH).read());
+        let caplength = u64::from(
+            window
+                .at::<u8>(offset_of!(Capability, caplength_and_version))
+                .read(),
+        );
         if caplength == 0 {
             return Err("the xHCI controller reports a zero CAPLENGTH");
         }
-        let dboff = u64::from(window.at::<u32>(DBOFF).read());
-        let rtsoff = u64::from(window.at::<u32>(RTSOFF).read());
+        let dboff = u64::from(window.at::<u32>(offset_of!(Capability, dboff)).read());
+        let rtsoff = u64::from(window.at::<u32>(offset_of!(Capability, rtsoff)).read());
         Ok(Self {
             window,
             caplength,
@@ -206,7 +416,8 @@ impl Registers {
 
     /// One of interrupter 0's runtime registers, relative to `RTSOFF`.
     fn runtime<T: Copy>(&self, offset: usize) -> Mmio<T> {
-        self.window.at(self.rtsoff as usize + INTERRUPTER0 + offset)
+        self.window
+            .at(self.rtsoff as usize + offset_of!(Runtime, interrupter0) + offset)
     }
 
     /// One entry of the doorbell array, relative to `DBOFF`.
@@ -216,7 +427,7 @@ impl Registers {
 
     /// The status register of port `port` (numbered from 1).
     fn port_status(&self, port: u32) -> Mmio<u32> {
-        let offset = PORT_REGISTERS + (port as usize - 1) * PORT_SIZE;
+        let offset = PORT_REGISTERS + (port as usize - 1) * size_of::<Port>();
         self.operational(offset)
     }
 
@@ -224,7 +435,50 @@ impl Registers {
     pub fn version(&self) -> u16 {
         // The capability dword holds CAPLENGTH, a reserved byte, then the
         // version, so read the whole dword and shift the version out.
-        (self.read_cap(CAPLENGTH) >> 16) as u16
+        (self.read_cap(offset_of!(Capability, caplength_and_version)) >> 16) as u16
+    }
+
+    fn capability_value(&self) -> Capability {
+        let _ = offset_of!(Capability, caplength_and_version);
+        Capability {
+            caplength_and_version: self
+                .read_cap(offset_of!(Capability, caplength_and_version)),
+            hcsparams1: self.read_cap(offset_of!(Capability, hcsparams1)),
+            hcsparams2: self.read_cap(offset_of!(Capability, hcsparams2)),
+            hcsparams3: self.read_cap(offset_of!(Capability, hcsparams3)),
+            hccparams1: self.read_cap(offset_of!(Capability, hccparams1)),
+            dboff: self.read_cap(offset_of!(Capability, dboff)),
+            rtsoff: self.read_cap(offset_of!(Capability, rtsoff)),
+            hccparams2: self.read_cap(offset_of!(Capability, hccparams2)),
+        }
+    }
+
+    fn usbcmd(&self) -> UsbCmd {
+        UsbCmd::new(self.read_op(offset_of!(Operational, usbcmd)))
+    }
+
+    fn set_usbcmd(&self, command: UsbCmd) {
+        self.write_op(offset_of!(Operational, usbcmd), command.raw());
+    }
+
+    fn usbsts(&self) -> UsbSts {
+        UsbSts::new(self.read_op(offset_of!(Operational, usbsts)))
+    }
+
+    /// Waits until `done` holds, or fails with `what` after the timeout.
+    fn wait_until(
+        &self,
+        what: &'static str,
+        mut done: impl FnMut() -> bool,
+    ) -> Result<()> {
+        let deadline = timer::nanoseconds() + TIMEOUT_MS * 1_000_000;
+        while !done() {
+            if timer::nanoseconds() >= deadline {
+                return Err(what);
+            }
+            core::hint::spin_loop();
+        }
+        Ok(())
     }
 
     fn read_cap(&self, offset: usize) -> u32 {
@@ -254,29 +508,6 @@ impl Registers {
     fn ring_doorbell(&self, slot: u32, target: u32) {
         self.doorbell(slot).write((target << 16) | slot);
     }
-
-    /// Waits until `mask` is clear in `USBSTS`, or gives up.
-    fn wait_status_clear(&self, mask: u32) -> Result<()> {
-        let deadline = timer::nanoseconds() + TIMEOUT_MS * 1_000_000;
-        while self.read_op(USBSTS) & mask != 0 {
-            if timer::nanoseconds() >= deadline {
-                return Err("the xHCI controller did not reach the expected state");
-            }
-            core::hint::spin_loop();
-        }
-        Ok(())
-    }
-
-    fn wait_status_set(&self, mask: u32) -> Result<()> {
-        let deadline = timer::nanoseconds() + TIMEOUT_MS * 1_000_000;
-        while self.read_op(USBSTS) & mask == 0 {
-            if timer::nanoseconds() >= deadline {
-                return Err("the xHCI controller did not reach the expected state");
-            }
-            core::hint::spin_loop();
-        }
-        Ok(())
-    }
 }
 
 /// A ring of TRBs that the controller walks at its own pace.
@@ -286,16 +517,16 @@ impl Registers {
 /// from an earlier lap.
 struct Ring<const N: usize> {
     entries: IoBox<[Trb; N]>,
-    index: usize,
-    cycle: bool,
+    next_index: usize,
+    cycle_state: bool,
 }
 
 impl<const N: usize> Ring<N> {
     fn new(tables: &mut PageTables) -> Self {
         Self {
             entries: IoBox::new(tables),
-            index: 0,
-            cycle: true,
+            next_index: 0,
+            cycle_state: true,
         }
     }
 
@@ -305,206 +536,87 @@ impl<const N: usize> Ring<N> {
 
     /// Where the next entry sits, in bytes from the ring's address.
     fn offset(&self) -> u64 {
-        (self.index * core::mem::size_of::<Trb>()) as u64
+        (self.next_index * core::mem::size_of::<Trb>()) as u64
     }
 
     /// Hands over one entry. The last slot is the link, so `N - 1` are usable and
     /// a ring that fills up needs a lap the driver cannot start yet.
     fn enqueue(&mut self, trb: Trb) -> Result<()> {
-        if self.index + 1 >= N {
+        if self.next_index + 1 >= N {
             return Err("the command ring is full");
         }
         self.entries
-            .write_slot(self.index, trb)
+            .write_slot(self.next_index, trb)
             .ok_or("the command ring is full")?;
-        self.index += 1;
+        self.next_index += 1;
         Ok(())
     }
 
     /// The next entry whose cycle bit says it belongs to this lap.
     fn dequeue(&mut self) -> Option<Trb> {
-        let entry = self.entries.read_slot(self.index)?;
-        if (entry.control & 1 != 0) != self.cycle {
+        let entry = self.entries.read_slot(self.next_index)?;
+        if (entry.control & 1 != 0) != self.cycle_state {
             return None;
         }
-        self.index += 1;
-        if self.index == N {
-            self.index = 0;
-            self.cycle = !self.cycle;
+        self.next_index += 1;
+        if self.next_index == N {
+            self.next_index = 0;
+            self.cycle_state = !self.cycle_state;
         }
         Some(entry)
     }
 
     /// Points the last slot back at the first, closing the ring.
     fn link_to_start(&mut self) {
-        let link = Trb::link(self.entries.address(), self.cycle);
+        let link = Trb::link(self.entries.address(), self.cycle_state);
         self.entries.write_slot(N - 1, link);
     }
 }
 
 /// The scratchpad buffers: the array of their addresses, and the pages it names.
-type Scratchpad = (
-    IoBox<[u64; MAX_SCRATCHPAD]>,
-    alloc::vec::Vec<IoBox<[u8; 4096]>>,
-);
+type Scratchpad = (IoBox<[u64; MAX_SCRATCHPAD]>, Vec<IoBox<[u8; 4096]>>);
 
-/// A device the controller has given an address to.
-struct Device {
-    slot: u32,
-    port: u32,
-    /// The endpoint 0 ring: control transfers go through it.
-    ep0: Ring<RING_TRBS>,
-    /// Where the controller keeps the device's contexts.
-    _context: IoBox<[u32; CONTEXT_WORDS]>,
-    /// The input context the device was addressed with.
-    _input: IoBox<[u32; CONTEXT_WORDS]>,
-}
-
-/// An xHCI host controller that has been reset, given rings, and started.
-pub struct HostController {
+/// The root hub's ports and what they report.
+struct Ports {
     registers: Registers,
-    max_ports: u32,
-    command_ring: Ring<RING_TRBS>,
-    event_ring: Ring<RING_TRBS>,
-    erst: IoBox<[ErstEntry; 1]>,
-    dcbaa: IoBox<[u64; MAX_SLOTS]>,
-    _scratchpad: Option<Scratchpad>,
-    devices: alloc::vec::Vec<Device>,
+    number_of_ports: u32,
 }
 
-impl HostController {
-    /// Takes the controller over: halt it, reset it, give it its rings and start
-    /// it, then prove the whole chain with a no-op command.
-    pub fn init(registers: Registers, tables: &mut PageTables) -> Result<Self> {
-        let hcsparams1 = registers.read_cap(HCSPARAMS1);
-        let max_slots = hcsparams1 & 0xff;
-        let max_interrupters = (hcsparams1 >> 8) & 0x7ff;
-        let max_ports = (hcsparams1 >> 24) & 0xff;
-        let scratchpad = scratchpad_count(registers.read_cap(HCSPARAMS2));
-        if registers.read_cap(HCCPARAMS1) & HCC_CONTEXT_SIZE != 0 {
-            return Err("this driver only supports 32-byte contexts");
-        }
-        info!(
-            "xhci: {max_slots} slots, {max_interrupters} interrupters, {max_ports} ports, \
-             {scratchpad} scratchpad buffers"
-        );
-
-        // The firmware may have left the controller running with its own rings;
-        // stop it before taking them away.
-        registers.write_op(USBCMD, registers.read_op(USBCMD) & !USBCMD_RUN);
-        registers.wait_status_set(USBSTS_HALTED)?;
-        registers.write_op(USBCMD, registers.read_op(USBCMD) | USBCMD_RESET);
-        registers.wait_status_clear(USBCMD_RESET)?;
-        registers.wait_status_clear(USBSTS_NOT_READY)?;
-
-        // 4 KiB pages: the only size this OS allocates.
-        registers.write_op(PAGESIZE, 1);
-
-        let mut controller = Self {
-            registers,
-            max_ports,
-            command_ring: Ring::new(tables),
-            event_ring: Ring::new(tables),
-            erst: IoBox::new(tables),
-            dcbaa: IoBox::new(tables),
-            _scratchpad: None,
-            devices: alloc::vec::Vec::new(),
-        };
-        controller.register_rings(tables, max_slots, scratchpad)?;
-        controller.start()?;
-        controller.check_with_no_op()?;
-        Ok(controller)
+impl Ports {
+    fn number_of_ports(&self) -> u32 {
+        self.number_of_ports
     }
 
-    /// Tells the controller where its device context array and both rings are.
-    fn register_rings(
-        &mut self,
-        tables: &mut PageTables,
-        max_slots: u32,
-        scratchpad: u32,
-    ) -> Result<()> {
-        if max_slots as usize >= MAX_SLOTS {
-            return Err("the controller has more slots than this driver supports");
-        }
-        if scratchpad as usize > MAX_SCRATCHPAD {
-            return Err("the controller wants more scratchpad buffers than supported");
-        }
-        let registers = &self.registers;
-
-        if scratchpad > 0 {
-            // Entry 0 of the device context array is where the controller looks
-            // for the scratchpad buffers it needs for its own work.
-            let mut buffers = IoBox::<[u64; MAX_SCRATCHPAD]>::new(tables);
-            let mut pages = alloc::vec::Vec::new();
-            for index in 0..scratchpad as usize {
-                let page = IoBox::<[u8; 4096]>::new(tables);
-                buffers
-                    .write_slot(index, page.address())
-                    .ok_or("the scratchpad array is full")?;
-                pages.push(page);
-            }
-            self.dcbaa
-                .write_slot(0, buffers.address())
-                .ok_or("the device context array is full")?;
-            self._scratchpad = Some((buffers, pages));
-        }
-        registers.write_op64(DCBAAP, self.dcbaa.address());
-        registers.write_op(CONFIG, max_slots & 0xff);
-
-        self.erst
-            .write_slot(
-                0,
-                ErstEntry {
-                    base: self.event_ring.address(),
-                    size: RING_TRBS as u32,
-                    _reserved: 0,
-                },
-            )
-            .ok_or("the segment table has no room")?;
-        registers.write_rt(ERSTSZ, 1);
-        registers.write_rt64(ERSTBA, self.erst.address());
-        registers.write_rt64(ERDP, self.event_ring.address());
-
-        self.command_ring.link_to_start();
-        registers.write_op64(CRCR, self.command_ring.address() | 1);
-        Ok(())
+    fn status(&self, port: u32) -> Portsc {
+        Portsc::new(self.registers.port_status(port).read())
     }
 
-    fn start(&mut self) -> Result<()> {
-        let registers = &self.registers;
-        registers.write_op(USBCMD, registers.read_op(USBCMD) | USBCMD_RUN);
-        registers.wait_status_clear(USBSTS_HALTED)
+    /// Acknowledges the change bits a port has set.
+    fn acknowledge(&self, port: u32, mut status: Portsc) {
+        status.acknowledge_changes();
+        self.registers.port_status(port).write(status.raw());
     }
 
-    /// The version the controller reports, in BCD.
-    pub fn version(&self) -> u16 {
-        self.registers.version()
-    }
-
-    /// Port numbers the controller reports, from 1.
-    pub fn ports(&self) -> u32 {
-        self.max_ports
-    }
-
-    /// Resets `port` and waits for the controller to finish, so the device is in
-    /// the default state and can be addressed.
-    fn reset_port(&mut self, port: u32) -> Result<()> {
+    /// Resets `port` and waits until the device is enabled, so it can be
+    /// addressed.
+    fn reset(&self, port: u32) -> Result<()> {
         let status = self.registers.port_status(port);
-        let current = status.read();
-        if current & PORTSC_CONNECTED == 0 {
+        let mut current = Portsc::new(status.read());
+        if current.connected() == 0 {
             return Err("no device on the port");
         }
-        // Clear whatever change bits the firmware left, then start the reset.
-        status.write(current | PORTSC_CHANGES);
-        status.write(status.read() | PORTSC_RESET | PORTSC_CONNECT_CHANGED);
+        current.acknowledge_changes();
+        status.write(current.raw());
+        current.request_reset();
+        status.write(current.raw());
 
         let deadline = timer::nanoseconds() + TIMEOUT_MS * 1_000_000;
         loop {
-            let current = status.read();
-            if current & PORTSC_RESET_CHANGED != 0 {
-                // The reset finished; clear the change bits and check the result.
-                status.write(current | PORTSC_CHANGES);
-                if status.read() & PORTSC_ENABLED == 0 {
+            let mut current = Portsc::new(status.read());
+            if current.reset_changed() != 0 {
+                current.acknowledge_changes();
+                status.write(current.raw());
+                if Portsc::new(status.read()).enabled() == 0 {
                     return Err("the port did not become enabled");
                 }
                 return Ok(());
@@ -516,24 +628,438 @@ impl HostController {
         }
     }
 
-    /// The protocol speed ID of a port (`PORTSC` bits 13..10).
-    fn port_speed(&self, port: u32) -> Result<u32> {
-        let speed = (self.registers.port_status(port).read() >> 10) & 0xf;
-        if (1..=4).contains(&speed) {
-            Ok(speed)
-        } else {
-            Err("the port reports an unknown speed")
+    /// The speed the port reports.
+    fn speed(&self, port: u32) -> Result<Speed> {
+        Speed::from_portsc(self.status(port).speed())
+            .ok_or("the port reports an unknown speed")
+    }
+}
+
+/// A device the controller has given an address to.
+struct Device {
+    slot: u32,
+    port: u32,
+    /// The endpoint 0 ring: control transfers go through it.
+    endpoint0_ring: Ring<RING_TRBS>,
+    /// Where the controller keeps the device's contexts.
+    _device_context: IoBox<[u32; CONTEXT_WORDS]>,
+    /// The input context the device was addressed with.
+    _input_context: IoBox<[u32; CONTEXT_WORDS]>,
+}
+
+/// The command ring and the doorbell that says it moved.
+struct CommandChannel {
+    ring: Ring<RING_TRBS>,
+}
+
+impl CommandChannel {
+    fn new(tables: &mut PageTables) -> Self {
+        Self {
+            ring: Ring::new(tables),
         }
     }
 
-    /// The largest packet a control endpoint may use at that speed.
-    fn max_packet_size(speed: u32) -> Result<u16> {
-        match speed {
-            1 | 2 => Ok(8),
-            3 => Ok(64),
-            4 => Ok(512),
-            _ => Err("the port reports an unknown speed"),
+    fn address(&self) -> u64 {
+        self.ring.address()
+    }
+
+    /// The cycle bit the next command must carry.
+    fn cycle_state(&self) -> bool {
+        self.ring.cycle_state
+    }
+
+    fn link_to_start(&mut self) {
+        self.ring.link_to_start();
+    }
+
+    fn send(&mut self, registers: &Registers, trb: Trb) -> Result<()> {
+        self.ring.enqueue(trb)?;
+        registers.ring_doorbell(0, 0);
+        Ok(())
+    }
+}
+
+/// The event ring, the table that describes it, and the read side of the
+/// controller's answers.
+struct EventChannel {
+    ring: Ring<RING_TRBS>,
+    event_ring_segment_table: IoBox<[ErstEntry; 1]>,
+}
+
+impl EventChannel {
+    fn new(tables: &mut PageTables) -> Self {
+        Self {
+            ring: Ring::new(tables),
+            event_ring_segment_table: IoBox::new(tables),
         }
+    }
+
+    /// Points the controller at the segment table and the ring.
+    fn program(&mut self, registers: &Registers) -> Result<()> {
+        self.event_ring_segment_table
+            .write_slot(
+                0,
+                ErstEntry {
+                    ring_segment_base_address: self.ring.address(),
+                    ring_segment_size: RING_TRBS as u32,
+                    _reserved: 0,
+                },
+            )
+            .ok_or("the segment table has no room")?;
+        registers.write_rt(offset_of!(Interrupter, erstsz), 1);
+        registers.write_rt64(
+            offset_of!(Interrupter, erstba),
+            self.event_ring_segment_table.address(),
+        );
+        registers.write_rt64(offset_of!(Interrupter, erdp), self.ring.address());
+        Ok(())
+    }
+
+    /// The next event the controller writes, if one is waiting.
+    fn next(&mut self, registers: &Registers) -> Result<Trb> {
+        let deadline = timer::nanoseconds() + TIMEOUT_MS * 1_000_000;
+        loop {
+            if let Some(event) = self.ring.dequeue() {
+                let dequeue = self.ring.address() + self.ring.offset();
+                registers.write_rt64(offset_of!(Interrupter, erdp), dequeue);
+                return Ok(event);
+            }
+            if timer::nanoseconds() >= deadline {
+                return Err("the xHCI controller sent no event");
+            }
+            core::hint::spin_loop();
+        }
+    }
+
+    /// Waits for a command's completion, letting events that belong to other
+    /// things pass: ports report changes on their own schedule.
+    fn wait_for_completion(&mut self, registers: &Registers) -> Result<Trb> {
+        loop {
+            let event = self.next(registers)?;
+            match trb_type(&event) {
+                TrbType::CommandCompletion => return Ok(event),
+                TrbType::PortStatusChange => continue,
+                _ => continue,
+            }
+        }
+    }
+}
+
+bitfield! {
+    /// Slot context word 0: the device's speed and how many contexts follow.
+    SlotContext0: u32 {
+        route_string: 19, 0,
+        speed: 23, 20 -> set_speed,
+        context_entries: 31, 27 -> set_context_entries,
+    }
+}
+
+bitfield! {
+    /// Slot context word 1: where the device sits.
+    SlotContext1: u32 {
+        max_exit_latency: 15, 0,
+        root_hub_port: 23, 16 -> set_root_hub_port,
+    }
+}
+
+bitfield! {
+    /// Slot context word 3: what the controller reports about the device.
+    SlotContext3: u32 {
+        device_address: 7, 0,
+        slot_state: 31, 27,
+    }
+}
+
+bitfield! {
+    /// Endpoint context word 1: what the endpoint is and how it behaves.
+    EndpointContext1: u32 {
+        cerr: 2, 1 -> set_cerr,
+        ep_type: 5, 3 -> set_ep_type,
+        max_packet: 31, 16 -> set_max_packet,
+    }
+}
+
+bitfield! {
+    /// Endpoint context word 4: the average TRB length and the periodic payload.
+    EndpointContext4: u32 {
+        average_trb_length: 15, 0 -> set_average_trb_length,
+    }
+}
+
+/// The contexts an `Address Device` command hands to the controller.
+struct InputContext {
+    memory: IoBox<[u32; CONTEXT_WORDS]>,
+}
+
+impl InputContext {
+    fn new(tables: &mut PageTables) -> Self {
+        Self {
+            memory: IoBox::new(tables),
+        }
+    }
+
+    fn address(&self) -> u64 {
+        self.memory.address()
+    }
+
+    /// Adds the slot context (A0) and endpoint 0 (A1) to this command.
+    fn add_slot_and_endpoint0(&mut self) -> Result<()> {
+        self.memory
+            .write_slot(1, 0b11)
+            .ok_or("the input context is too small")?;
+        Ok(())
+    }
+
+    /// Speed, one context entry, and the root hub port the device sits behind.
+    fn set_slot(&mut self, speed: Speed, port: u32) -> Result<()> {
+        let slot = CONTEXT_SIZE / 4;
+        let mut word0 = SlotContext0::new(
+            self.memory
+                .read_slot(slot)
+                .ok_or("the input context is too small")?,
+        );
+        word0.set_speed(speed.psi());
+        word0.set_context_entries(1);
+        self.memory
+            .write_slot(slot, word0.raw())
+            .ok_or("the input context is too small")?;
+
+        let mut word1 = SlotContext1::new(
+            self.memory
+                .read_slot(slot + 1)
+                .ok_or("the input context is too small")?,
+        );
+        word1.set_root_hub_port(port);
+        self.memory
+            .write_slot(slot + 1, word1.raw())
+            .ok_or("the input context is too small")?;
+        Ok(())
+    }
+
+    /// Endpoint 0: control, three retries, its packet size and its ring.
+    fn set_endpoint0(&mut self, max_packet: u16, ring: u64) -> Result<()> {
+        let ep0 = 2 * (CONTEXT_SIZE / 4);
+        let mut word1 = EndpointContext1::new(
+            self.memory
+                .read_slot(ep0 + 1)
+                .ok_or("the input context is too small")?,
+        );
+        word1.set_max_packet(u32::from(max_packet));
+        // Endpoint type 4 is a control endpoint.
+        word1.set_ep_type(4);
+        word1.set_cerr(3);
+        self.memory
+            .write_slot(ep0 + 1, word1.raw())
+            .ok_or("the input context is too small")?;
+
+        // The dequeue pointer keeps its low four bits for the cycle state.
+        self.memory
+            .write_slot(ep0 + 2, (ring as u32 & !0xf) | 1)
+            .ok_or("the input context is too small")?;
+        self.memory
+            .write_slot(ep0 + 3, (ring >> 32) as u32)
+            .ok_or("the input context is too small")?;
+
+        let mut word4 = EndpointContext4::new(
+            self.memory
+                .read_slot(ep0 + 4)
+                .ok_or("the input context is too small")?,
+        );
+        // Control endpoints use an average TRB length of 8.
+        word4.set_average_trb_length(8);
+        self.memory
+            .write_slot(ep0 + 4, word4.raw())
+            .ok_or("the input context is too small")?;
+        Ok(())
+    }
+}
+
+/// An xHCI host controller that has been reset, given rings, and started.
+pub struct HostController {
+    registers: Registers,
+    commands: CommandChannel,
+    events: EventChannel,
+    ports: Ports,
+    /// Device context base address array (`DCBAA`): where each slot's context
+    /// lives, and entry 0 the scratchpad buffers.
+    dcbaa: IoBox<[u64; MAX_SLOTS]>,
+    _scratchpad_buffers: Option<Scratchpad>,
+    devices: Vec<Device>,
+}
+
+impl HostController {
+    /// Takes the controller over: halt it, reset it, give it its rings and start
+    /// it, then prove the whole chain with a no-op command.
+    pub fn init(registers: Registers, tables: &mut PageTables) -> Result<Self> {
+        let capability = registers.capability_value();
+        let max_slots = capability.hcsparams1 & 0xff;
+        let max_interrupters = (capability.hcsparams1 >> 8) & 0x7ff;
+        let max_ports = (capability.hcsparams1 >> 24) & 0xff;
+        let scratchpad = scratchpad_count(capability.hcsparams2);
+        if HccParams1::new(capability.hccparams1).context_size() != 0 {
+            return Err("this driver only supports 32-byte contexts");
+        }
+        info!(
+            "xhci: {max_slots} slots, {max_interrupters} interrupters, {max_ports} ports, \
+             {scratchpad} scratchpad buffers"
+        );
+
+        // The firmware may have left the controller running with its own rings;
+        // stop it before taking them away.
+        let mut command = registers.usbcmd();
+        command.set_run(0);
+        registers.set_usbcmd(command);
+        registers.wait_until("the controller did not stop", || {
+            registers.usbsts().halted() == 1
+        })?;
+
+        command = registers.usbcmd();
+        command.set_reset(1);
+        registers.set_usbcmd(command);
+        registers.wait_until("the controller did not finish resetting", || {
+            registers.usbcmd().reset() == 0
+        })?;
+        registers.wait_until("the controller is not ready", || {
+            registers.usbsts().not_ready() == 0
+        })?;
+        registers.write_op(offset_of!(Operational, pagesize), 1);
+
+        let mut controller = Self {
+            registers,
+            commands: CommandChannel::new(tables),
+            events: EventChannel::new(tables),
+            ports: Ports {
+                registers,
+                number_of_ports: max_ports,
+            },
+            dcbaa: IoBox::new(tables),
+            _scratchpad_buffers: None,
+            devices: Vec::new(),
+        };
+        controller.program(max_slots, scratchpad, tables)?;
+        controller.start()?;
+        controller.check_with_no_op()?;
+        Ok(controller)
+    }
+
+    /// Gives the controller its device context array and both rings.
+    fn program(
+        &mut self,
+        max_slots: u32,
+        scratchpad: u32,
+        tables: &mut PageTables,
+    ) -> Result<()> {
+        if max_slots as usize >= MAX_SLOTS {
+            return Err("the controller has more slots than this driver supports");
+        }
+        if scratchpad as usize > MAX_SCRATCHPAD {
+            return Err("the controller wants more scratchpad buffers than supported");
+        }
+        if scratchpad > 0 {
+            // Entry 0 of the device context array is where the controller looks
+            // for the scratchpad buffers it needs for its own work.
+            let mut buffers = IoBox::<[u64; MAX_SCRATCHPAD]>::new(tables);
+            let mut scratchpad_buffers = Vec::new();
+            for index in 0..scratchpad as usize {
+                let buffer = IoBox::<[u8; 4096]>::new(tables);
+                buffers
+                    .write_slot(index, buffer.address())
+                    .ok_or("the scratchpad array is full")?;
+                scratchpad_buffers.push(buffer);
+            }
+            self.dcbaa
+                .write_slot(0, buffers.address())
+                .ok_or("the device context array is full")?;
+            self._scratchpad_buffers = Some((buffers, scratchpad_buffers));
+        }
+        self.registers
+            .write_op64(offset_of!(Operational, dcbaap), self.dcbaa.address());
+        self.registers
+            .write_op(offset_of!(Operational, config), max_slots & 0xff);
+        self.events.program(&self.registers)?;
+        self.commands.link_to_start();
+        self.registers
+            .write_op64(offset_of!(Operational, crcr), self.commands.address() | 1);
+        Ok(())
+    }
+
+    fn start(&mut self) -> Result<()> {
+        let mut command = self.registers.usbcmd();
+        command.set_run(1);
+        self.registers.set_usbcmd(command);
+        self.registers
+            .wait_until("the controller did not start", || {
+                self.registers.usbsts().halted() == 0
+            })
+    }
+
+    /// The version the controller reports, in BCD.
+    pub fn version(&self) -> u16 {
+        self.registers.version()
+    }
+
+    /// Port numbers the controller reports, from 1.
+    pub fn number_of_ports(&self) -> u32 {
+        self.ports.number_of_ports()
+    }
+
+    /// Sends a no-op command and waits for its completion event: if that arrives,
+    /// the doorbell, the command ring, the event ring and the completion path all
+    /// work.
+    fn check_with_no_op(&mut self) -> Result<()> {
+        let trb = Trb::no_op_command(self.commands.cycle_state());
+        self.commands.send(&self.registers, trb)?;
+        let event = self.events.wait_for_completion(&self.registers)?;
+        if completion_code(&event) != CompletionCode::Success {
+            return Err("the no-op command did not complete successfully");
+        }
+        info!("xhci: started, and the no-op command completed");
+        Ok(())
+    }
+
+    /// Finds connected devices, resets their ports, and lets the controller pick
+    /// a slot for each.
+    pub fn enumerate_ports(&mut self, tables: &mut PageTables) -> Result<()> {
+        for port in 1..=self.ports.number_of_ports() {
+            let status = self.ports.status(port);
+            if status.connected() == 0 {
+                continue;
+            }
+            self.ports.acknowledge(port, status);
+            info!(
+                "xhci: port {port} has a device (portsc {:#010x})",
+                status.raw()
+            );
+            self.ports.reset(port)?;
+            let after = self.ports.status(port);
+            // Slot type 0 is a USB2 device; a SuperSpeed port asks for type 1.
+            let slot = self.enable_slot(0)?;
+            info!(
+                "xhci: port {port} reset (portsc {:#010x}), slot {slot} assigned",
+                after.raw()
+            );
+            self.address_device(tables, slot, port)?;
+        }
+        for device in &self.devices {
+            info!(
+                "xhci: slot {} on port {} addressed, endpoint 0 ring at {:#018x}",
+                device.slot,
+                device.port,
+                device.endpoint0_ring.address()
+            );
+        }
+        Ok(())
+    }
+
+    /// Asks the controller for a slot, which is where a device's contexts live.
+    fn enable_slot(&mut self, slot_type: u32) -> Result<u32> {
+        let trb = Trb::enable_slot(self.commands.cycle_state(), slot_type);
+        self.commands.send(&self.registers, trb)?;
+        let event = self.events.wait_for_completion(&self.registers)?;
+        if completion_code(&event) != CompletionCode::Success {
+            return Err("the enable slot command failed");
+        }
+        Ok(slot_id(&event))
     }
 
     /// Gives the device on `port` an address: the input context describes the
@@ -544,165 +1070,47 @@ impl HostController {
         slot: u32,
         port: u32,
     ) -> Result<()> {
-        let speed = self.port_speed(port)?;
-        let max_packet = Self::max_packet_size(speed)?;
-        let ep0 = Ring::<RING_TRBS>::new(tables);
-        let mut input = IoBox::<[u32; CONTEXT_WORDS]>::new(tables);
-        let context = IoBox::<[u32; CONTEXT_WORDS]>::new(tables);
+        let speed = self.ports.speed(port)?;
+        let max_packet = speed.max_packet_size();
+        let endpoint0 = Ring::<RING_TRBS>::new(tables);
+        let mut input_context = InputContext::new(tables);
+        let device_context = IoBox::<[u32; CONTEXT_WORDS]>::new(tables);
 
-        // Input control context: A0 adds the slot context, A1 endpoint 0.
-        input
-            .write_slot(1, 0b11)
-            .ok_or("the input context is too small")?;
-        let slot_context = CONTEXT_SIZE / 4;
-        // Slot context: speed, one context entry, root hub port number.
-        input
-            .write_slot(slot_context, (speed << 20) | (1 << 27))
-            .ok_or("the input context is too small")?;
-        input
-            .write_slot(slot_context + 1, port << 16)
-            .ok_or("the input context is too small")?;
-        // Endpoint 0 context: control, three retries, max packet, its ring.
-        let ep0_context = 2 * slot_context;
-        input
-            .write_slot(
-                ep0_context + 1,
-                (u32::from(max_packet) << 16) | (4 << 3) | (3 << 1),
-            )
-            .ok_or("the input context is too small")?;
-        input
-            .write_slot(ep0_context + 2, (ep0.address() as u32 & !0xf) | 1)
-            .ok_or("the input context is too small")?;
-        input
-            .write_slot(ep0_context + 3, (ep0.address() >> 32) as u32)
-            .ok_or("the input context is too small")?;
-        // Control endpoints use an average TRB length of 8.
-        input
-            .write_slot(ep0_context + 4, 8)
-            .ok_or("the input context is too small")?;
+        input_context.add_slot_and_endpoint0()?;
+        input_context.set_slot(speed, port)?;
+        input_context.set_endpoint0(max_packet, endpoint0.address())?;
         self.dcbaa
-            .write_slot(slot as usize, context.address())
+            .write_slot(slot as usize, device_context.address())
             .ok_or("the device context array is full")?;
 
-        let trb = Trb::address_device(input.address(), slot, self.command_ring.cycle);
-        self.command(trb)?;
-        let event = self.wait_for_completion()?;
-        if completion_code(&event) != COMPLETION_SUCCESS {
+        let trb = Trb::address_device(
+            input_context.address(),
+            slot,
+            self.commands.cycle_state(),
+        );
+        self.commands.send(&self.registers, trb)?;
+        let event = self.events.wait_for_completion(&self.registers)?;
+        if completion_code(&event) != CompletionCode::Success {
             return Err("the address device command failed");
         }
-        // The controller fills in the device context: the slot context's last
-        // word carries the address it assigned and the slot's state.
-        let slot_status = context.read_slot(11).unwrap_or(0);
+        // The controller writes the device context, and the slot context's last
+        // word carries the address it assigned.
+        let slot_context = SlotContext3::new(device_context.read_slot(11).unwrap_or(0));
         info!(
             "xhci: slot {slot} has device address {}",
-            slot_status & 0xff
+            slot_context.device_address()
         );
         self.devices.push(Device {
             slot,
             port,
-            ep0,
-            _context: context,
-            _input: input,
+            endpoint0_ring: endpoint0,
+            _device_context: device_context,
+            _input_context: input_context.memory,
         });
         Ok(())
     }
-
-    /// Finds connected devices, resets their ports, and lets the controller pick
-    /// a slot for each.
-    pub fn enumerate_ports(&mut self, tables: &mut PageTables) -> Result<()> {
-        for port in 1..=self.max_ports {
-            let status = self.registers.port_status(port).read();
-            if status & PORTSC_CONNECTED == 0 {
-                continue;
-            }
-            self.registers
-                .port_status(port)
-                .write(status | PORTSC_CHANGES);
-            info!("xhci: port {port} has a device (portsc {status:#010x})");
-            self.reset_port(port)?;
-            let after = self.registers.port_status(port).read();
-            // Slot type 0 is a USB2 device; a SuperSpeed port asks for type 1.
-            let slot = self.enable_slot(0)?;
-            info!("xhci: port {port} reset (portsc {after:#010x}), slot {slot} assigned");
-            self.address_device(tables, slot, port)?;
-        }
-        for device in &self.devices {
-            info!(
-                "xhci: slot {} on port {} addressed, endpoint 0 ring at {:#018x}",
-                device.slot,
-                device.port,
-                device.ep0.address()
-            );
-        }
-        Ok(())
-    }
-
-    /// Asks the controller for a slot, which is where a device's contexts live.
-    fn enable_slot(&mut self, slot_type: u32) -> Result<u32> {
-        let trb = Trb::enable_slot(self.command_ring.cycle, slot_type);
-        self.command(trb)?;
-        let event = self.wait_for_completion()?;
-        let code = completion_code(&event);
-        if code != COMPLETION_SUCCESS {
-            return Err("the enable slot command failed");
-        }
-        Ok(slot_id(&event))
-    }
-
-    /// Sends a no-op command and waits for its completion event: if that arrives,
-    /// the doorbell, the command ring, the event ring and the completion path all
-    /// work.
-    fn check_with_no_op(&mut self) -> Result<()> {
-        self.command(Trb::no_op_command(self.command_ring.cycle))?;
-        let event = self.wait_for_completion()?;
-        let code = completion_code(&event);
-        if code != COMPLETION_SUCCESS {
-            return Err("the no-op command did not complete successfully");
-        }
-        info!("xhci: started, and the no-op command completed");
-        Ok(())
-    }
-
-    /// Hands one command TRB to the controller.
-    fn command(&mut self, trb: Trb) -> Result<()> {
-        self.command_ring.enqueue(trb)?;
-        self.registers.ring_doorbell(0, 0);
-        Ok(())
-    }
-
-    /// Waits for a command's completion, letting events that belong to other
-    /// things pass: ports report changes on their own schedule.
-    fn wait_for_completion(&mut self) -> Result<Trb> {
-        loop {
-            let event = self.next_event()?;
-            match trb_type(&event) {
-                TRB_COMMAND_COMPLETION => return Ok(event),
-                TRB_PORT_STATUS_CHANGE => continue,
-                _ => continue,
-            }
-        }
-    }
-
-    /// Waits for the next event the controller writes into the event ring.
-    fn next_event(&mut self) -> Result<Trb> {
-        let deadline = timer::nanoseconds() + TIMEOUT_MS * 1_000_000;
-        loop {
-            if let Some(event) = self.event_ring.dequeue() {
-                // Tell the controller how far the driver has read; the address is
-                // 16-byte aligned, so this also clears the busy bit.
-                let dequeue = self.event_ring.address() + self.event_ring.offset();
-                self.registers.write_rt64(ERDP, dequeue);
-                return Ok(event);
-            }
-            if timer::nanoseconds() >= deadline {
-                return Err("the xHCI controller sent no event");
-            }
-            core::hint::spin_loop();
-        }
-    }
 }
 
-/// `HCSPARAMS2` holds the scratchpad buffer count in two 5-bit halves.
 fn scratchpad_count(hcsparams2: u32) -> u32 {
     let low = (hcsparams2 >> 21) & 0x1f;
     let high = (hcsparams2 >> 27) & 0x1f;

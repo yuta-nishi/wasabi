@@ -40,6 +40,7 @@ impl<T: Copy> Mmio<T> {
 ///
 /// Creating one is the only unsafe step; everything inside is an offset from
 /// that address, so the offsets cannot accidentally point somewhere else.
+#[derive(Clone, Copy)]
 pub struct Window {
     base: u64,
 }

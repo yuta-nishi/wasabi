@@ -4,7 +4,7 @@ use alloc::format;
 use alloc::string::String;
 use wasabi::debug::write_hexdump;
 
-pub fn hexdump_prints_16_bytes_per_line() {
+pub fn hexdump_prints_16_bytes_per_line_and_pads_the_last_one() {
     let mut out = String::new();
     write_hexdump(&mut out, b"0123456789abcdef").expect("hexdump failed");
     assert_eq!(
@@ -14,10 +14,11 @@ pub fn hexdump_prints_16_bytes_per_line() {
             "|0123456789abcdef|\n"
         )
     );
-}
 
-pub fn hexdump_pads_the_last_line() {
-    let mut out = String::new();
-    write_hexdump(&mut out, b"Hi").expect("hexdump failed");
-    assert_eq!(out, format!("00000000  48 69 {} |Hi|\n", "   ".repeat(14)));
+    let mut short = String::new();
+    write_hexdump(&mut short, b"Hi").expect("hexdump failed");
+    assert_eq!(
+        short,
+        format!("00000000  48 69 {} |Hi|\n", "   ".repeat(14))
+    );
 }

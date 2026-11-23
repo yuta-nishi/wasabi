@@ -13,12 +13,12 @@ pub fn write_hexdump(out: &mut impl fmt::Write, data: &[u8]) -> fmt::Result {
         }
         out.write_str(" |")?;
         for byte in chunk {
-            let c = if byte.is_ascii_graphic() || *byte == b' ' {
+            let character = if byte.is_ascii_graphic() || *byte == b' ' {
                 *byte as char
             } else {
                 '.'
             };
-            write!(out, "{c}")?;
+            write!(out, "{character}")?;
         }
         writeln!(out, "|")?;
     }

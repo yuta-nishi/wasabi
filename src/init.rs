@@ -1,6 +1,6 @@
 use crate::allocator::ALLOCATOR;
 use crate::console;
-use crate::graphics::Bitmap;
+use crate::graphics::FrameBuffer;
 use crate::graphics::draw_test_pattern;
 use crate::graphics::fill_rect;
 use crate::info;

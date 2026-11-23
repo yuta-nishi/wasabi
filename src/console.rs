@@ -1,6 +1,6 @@
 use crate::mutex::Mutex;
 use crate::serial::Serial;
-use crate::uefi::BitmapTextWriter;
+use crate::uefi::FrameBufferTextWriter;
 use crate::uefi::VramBufferInfo;
 use core::fmt;
 use core::fmt::Write;
@@ -35,15 +35,16 @@ fn screen_write(s: &str) {
         return;
     };
     let (cursor_x, cursor_y) = (screen.cursor_x, screen.cursor_y);
-    let mut writer = BitmapTextWriter::resume_at(&mut screen.buffer, cursor_x, cursor_y);
+    let mut writer =
+        FrameBufferTextWriter::resume_at(&mut screen.buffer, cursor_x, cursor_y);
     let _ = writer.write_str(s);
     (screen.cursor_x, screen.cursor_y) = writer.cursor();
 }
 
 /// Forwards every chunk to the serial port and, if present, the screen.
-struct Tee;
+struct OutputTee;
 
-impl fmt::Write for Tee {
+impl fmt::Write for OutputTee {
     fn write_str(&mut self, s: &str) -> fmt::Result {
         let _ = Serial.write_str(s);
         screen_write(s);
@@ -53,12 +54,12 @@ impl fmt::Write for Tee {
 
 /// Writes `s` without a trailing newline.
 pub fn print_str(s: &str) {
-    let _ = Tee.write_str(s);
+    let _ = OutputTee.write_str(s);
 }
 
 /// Writes formatted text without a trailing newline.
 pub fn print_fmt(args: fmt::Arguments) {
-    let _ = Tee.write_fmt(args);
+    let _ = OutputTee.write_fmt(args);
 }
 
 /// Prints to the serial port and the screen.

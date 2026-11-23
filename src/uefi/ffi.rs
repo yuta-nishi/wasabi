@@ -1,7 +1,7 @@
 pub type EfiHandle = u64;
 
 /// A C output parameter: a pointer through which the callee writes a `T`.
-pub(crate) type Out<T> = *mut T;
+pub(crate) type OutputParameter<T> = *mut T;
 
 #[repr(C)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
