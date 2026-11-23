@@ -1,6 +1,7 @@
 use crate::acpi::Mcfg;
 use crate::acpi::Rsdp;
 use crate::acpi::TableHeader;
+use crate::bitfield;
 use crate::info;
 use crate::result::Result;
 use core::fmt;
@@ -9,10 +10,15 @@ use core::ptr::write_volatile;
 
 /// Offset of the command register in the standard header.
 const COMMAND: u16 = 0x04;
-/// Command bit 1: the function decodes the memory window its BARs describe.
-const COMMAND_MEMORY: u16 = 1 << 1;
-/// Command bit 2: the function may read and write memory on its own (DMA).
-const COMMAND_BUS_MASTER: u16 = 1 << 2;
+
+bitfield! {
+    /// The command register: what a function may do on the bus.
+    Command {
+        io_space: 0, 0,
+        memory_space: 1, 1 -> set_memory_space,
+        bus_master: 2, 2 -> set_bus_master,
+    }
+}
 /// Offset of the first base address register; the six follow each other.
 const BAR0: u16 = 0x10;
 
@@ -138,11 +144,10 @@ impl ConfigSpace {
     /// Lets the function answer on its BAR window and start its own bus
     /// transactions. A device is deaf until both bits are set.
     pub fn enable(&self, address: Address) {
-        self.write_u16(
-            address,
-            COMMAND,
-            self.command(address) | COMMAND_MEMORY | COMMAND_BUS_MASTER,
-        );
+        let mut command = Command::new(u32::from(self.command(address)));
+        command.set_memory_space(1);
+        command.set_bus_master(1);
+        self.write_u16(address, COMMAND, command.raw() as u16);
     }
 
     /// Vendor and device ID, or `None` when no function answers at `address`.

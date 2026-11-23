@@ -8,7 +8,7 @@
 /// this number there".
 #[macro_export]
 macro_rules! bitfield {
-    ($(#[$meta:meta])* $name:ident { $($field:ident : $hi:expr, $lo:expr),* $(,)? }) => {
+    ($(#[$meta:meta])* $name:ident { $($field:ident : $hi:literal, $lo:literal $(-> $setter:ident)? ),* $(,)? }) => {
         $(#[$meta])*
         #[derive(Clone, Copy, PartialEq, Eq, Debug)]
         pub struct $name(u32);
@@ -36,6 +36,14 @@ macro_rules! bitfield {
                 pub const fn $field(self) -> u32 {
                     (self.0 >> $lo) & ((1u32 << ($hi - $lo + 1)) - 1)
                 }
+
+                $(
+                    #[allow(dead_code)]
+                    pub fn $setter(&mut self, value: u32) {
+                        let mask = Self::mask($hi, $lo);
+                        self.0 = (self.0 & !mask) | ((value << $lo) & mask);
+                    }
+                )?
             )*
         }
     };

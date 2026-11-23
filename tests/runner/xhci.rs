@@ -1,6 +1,11 @@
+use wasabi::pci::Command;
 use wasabi::xhci::CompletionCode;
+use wasabi::xhci::EndpointContext1;
 use wasabi::xhci::Portsc;
+use wasabi::xhci::SlotContext0;
+use wasabi::xhci::SlotContext1;
 use wasabi::xhci::Speed;
+use wasabi::xhci::TrbType;
 
 pub fn portsc_fields_come_out_of_the_word() {
     // A device that has just been plugged in: attached, link still training.
@@ -34,4 +39,43 @@ pub fn completion_codes_carry_names() {
     assert_eq!(CompletionCode::from_raw(1), CompletionCode::Success);
     assert_eq!(CompletionCode::from_raw(5), CompletionCode::TrbError);
     assert_eq!(CompletionCode::from_raw(99), CompletionCode::Other(99));
+}
+
+pub fn trb_types_have_names() {
+    assert_eq!(TrbType::from_raw(33), TrbType::CommandCompletion);
+    assert_eq!(TrbType::from_raw(34), TrbType::PortStatusChange);
+    assert_eq!(TrbType::from_raw(23), TrbType::NoOpCommand);
+    assert_eq!(TrbType::from_raw(63), TrbType::Other(63));
+}
+
+pub fn slot_context_words_are_set_by_name() {
+    let mut word0 = SlotContext0::new(0);
+    word0.set_speed(Speed::High.psi());
+    word0.set_context_entries(1);
+    assert_eq!(word0.speed(), 3);
+    assert_eq!(word0.context_entries(), 1);
+
+    let mut word1 = SlotContext1::new(0);
+    word1.set_root_hub_port(5);
+    assert_eq!(word1.root_hub_port(), 5);
+}
+
+pub fn endpoint_context_word_holds_the_control_settings() {
+    let mut word1 = EndpointContext1::new(0);
+    word1.set_max_packet(64);
+    word1.set_ep_type(4);
+    word1.set_cerr(3);
+    assert_eq!(word1.max_packet(), 64);
+    assert_eq!(word1.ep_type(), 4);
+    assert_eq!(word1.cerr(), 3);
+}
+
+pub fn pci_command_fields_are_named() {
+    let mut command = Command::new(0);
+    command.set_memory_space(1);
+    command.set_bus_master(1);
+    assert_eq!(command.raw(), 0b110);
+    assert_eq!(command.memory_space(), 1);
+    assert_eq!(command.bus_master(), 1);
+    assert_eq!(command.io_space(), 0);
 }

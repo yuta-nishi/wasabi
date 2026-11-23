@@ -156,6 +156,19 @@ extern "efiapi" fn efi_main(
             "completion_codes_carry_names",
             xhci::completion_codes_carry_names,
         ),
+        ("trb_types_have_names", xhci::trb_types_have_names),
+        (
+            "slot_context_words_are_set_by_name",
+            xhci::slot_context_words_are_set_by_name,
+        ),
+        (
+            "endpoint_context_word_holds_the_control_settings",
+            xhci::endpoint_context_word_holds_the_control_settings,
+        ),
+        (
+            "pci_command_fields_are_named",
+            xhci::pci_command_fields_are_named,
+        ),
     ])
 }
 

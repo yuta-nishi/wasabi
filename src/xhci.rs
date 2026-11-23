@@ -137,12 +137,6 @@ impl CompletionCode {
     }
 }
 
-/// `Enable Slot` (TRB type 9): the controller picks a slot for a device.
-const TRB_ENABLE_SLOT: u32 = 9;
-/// `Address Device` (TRB type 11): the controller gives the device an address
-/// and allocates the endpoints its input context describes.
-const TRB_ADDRESS_DEVICE: u32 = 11;
-
 /// 32-byte contexts: one slot context, one endpoint context per endpoint.
 const CONTEXT_SIZE: usize = 0x20;
 /// Words in a page of contexts.
@@ -183,19 +177,68 @@ struct Trb {
 // SAFETY: a TRB is four integers, so every bit pattern is valid.
 unsafe impl Zeroable for Trb {}
 
-/// `No Op Command` (TRB type 23; type 8 is the transfer-ring `No Op`): the
-/// controller completes it without doing anything, which makes it a check that
-/// the rings work.
-const TRB_NO_OP_COMMAND: u32 = 23;
-/// `Link` (TRB type 6): jumps back to the start of the ring.
-const TRB_LINK: u32 = 6;
-/// `Command Completion Event` (TRB type 33): the controller's answer to a command.
-const TRB_COMMAND_COMPLETION: u32 = 33;
-/// `Port Status Change Event` (TRB type 34): a port changed on its own.
-const TRB_PORT_STATUS_CHANGE: u32 = 34;
+/// What a TRB asks for or reports (xHCI specification, table 6-91).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum TrbType {
+    SetupStage,
+    DataStage,
+    StatusStage,
+    Link,
+    EnableSlot,
+    AddressDevice,
+    NoOpCommand,
+    TransferEvent,
+    CommandCompletion,
+    PortStatusChange,
+    Other(u32),
+}
 
-fn trb_type(trb: &Trb) -> u32 {
-    (trb.control >> 10) & 0x3f
+impl TrbType {
+    fn raw(self) -> u32 {
+        match self {
+            Self::SetupStage => 2,
+            Self::DataStage => 3,
+            Self::StatusStage => 4,
+            Self::Link => 6,
+            Self::EnableSlot => 9,
+            Self::AddressDevice => 11,
+            Self::NoOpCommand => 23,
+            Self::TransferEvent => 32,
+            Self::CommandCompletion => 33,
+            Self::PortStatusChange => 34,
+            Self::Other(raw) => raw,
+        }
+    }
+
+    pub fn from_raw(raw: u32) -> Self {
+        match raw {
+            2 => Self::SetupStage,
+            3 => Self::DataStage,
+            4 => Self::StatusStage,
+            6 => Self::Link,
+            9 => Self::EnableSlot,
+            11 => Self::AddressDevice,
+            23 => Self::NoOpCommand,
+            32 => Self::TransferEvent,
+            33 => Self::CommandCompletion,
+            34 => Self::PortStatusChange,
+            other => Self::Other(other),
+        }
+    }
+}
+
+bitfield! {
+    /// The control dword of a TRB: what kind it is and which lap it belongs to.
+    TrbControl {
+        cycle: 0, 0,
+        link_toggle: 1, 1,
+        trb_type: 15, 10,
+        slot: 31, 24,
+    }
+}
+
+fn trb_type(trb: &Trb) -> TrbType {
+    TrbType::from_raw(TrbControl::new(trb.control).trb_type())
 }
 
 fn completion_code(trb: &Trb) -> CompletionCode {
@@ -204,13 +247,13 @@ fn completion_code(trb: &Trb) -> CompletionCode {
 
 /// The slot a completion event was about.
 fn slot_id(trb: &Trb) -> u32 {
-    trb.control >> 24
+    TrbControl::new(trb.control).slot()
 }
 
 impl Trb {
     fn no_op_command(cycle: bool) -> Self {
         Self {
-            control: (TRB_NO_OP_COMMAND << 10) | u32::from(cycle),
+            control: (TrbType::NoOpCommand.raw() << 10) | u32::from(cycle),
             ..Self::default()
         }
     }
@@ -220,14 +263,18 @@ impl Trb {
         Self {
             parameter: input,
             status: 0,
-            control: (TRB_ADDRESS_DEVICE << 10) | (slot << 24) | u32::from(cycle),
+            control: (TrbType::AddressDevice.raw() << 10)
+                | (slot << 24)
+                | u32::from(cycle),
         }
     }
 
     /// `Enable Slot`: the controller answers with the slot it picked.
     fn enable_slot(cycle: bool, slot_type: u32) -> Self {
         Self {
-            control: (TRB_ENABLE_SLOT << 10) | (slot_type << 16) | u32::from(cycle),
+            control: (TrbType::EnableSlot.raw() << 10)
+                | (slot_type << 16)
+                | u32::from(cycle),
             ..Self::default()
         }
     }
@@ -238,7 +285,7 @@ impl Trb {
         Self {
             parameter: ring,
             status: 0,
-            control: (TRB_LINK << 10) | (1 << 1) | u32::from(cycle),
+            control: (TrbType::Link.raw() << 10) | (1 << 1) | u32::from(cycle),
         }
     }
 }
@@ -597,11 +644,52 @@ impl EventChannel {
         loop {
             let event = self.next(registers)?;
             match trb_type(&event) {
-                TRB_COMMAND_COMPLETION => return Ok(event),
-                TRB_PORT_STATUS_CHANGE => continue,
+                TrbType::CommandCompletion => return Ok(event),
+                TrbType::PortStatusChange => continue,
                 _ => continue,
             }
         }
+    }
+}
+
+bitfield! {
+    /// Slot context word 0: the device's speed and how many contexts follow.
+    SlotContext0 {
+        route_string: 19, 0,
+        speed: 23, 20 -> set_speed,
+        context_entries: 31, 27 -> set_context_entries,
+    }
+}
+
+bitfield! {
+    /// Slot context word 1: where the device sits.
+    SlotContext1 {
+        max_exit_latency: 15, 0,
+        root_hub_port: 23, 16 -> set_root_hub_port,
+    }
+}
+
+bitfield! {
+    /// Slot context word 3: what the controller reports about the device.
+    SlotContext3 {
+        device_address: 7, 0,
+        slot_state: 31, 27,
+    }
+}
+
+bitfield! {
+    /// Endpoint context word 1: what the endpoint is and how it behaves.
+    EndpointContext1 {
+        cerr: 2, 1 -> set_cerr,
+        ep_type: 5, 3 -> set_ep_type,
+        max_packet: 31, 16 -> set_max_packet,
+    }
+}
+
+bitfield! {
+    /// Endpoint context word 4: the average TRB length and the periodic payload.
+    EndpointContext4 {
+        average_trb_length: 15, 0 -> set_average_trb_length,
     }
 }
 
@@ -632,11 +720,25 @@ impl InputContext {
     /// Speed, one context entry, and the root hub port the device sits behind.
     fn set_slot(&mut self, speed: Speed, port: u32) -> Result<()> {
         let slot = CONTEXT_SIZE / 4;
+        let mut word0 = SlotContext0::new(
+            self.memory
+                .read_slot(slot)
+                .ok_or("the input context is too small")?,
+        );
+        word0.set_speed(speed.psi());
+        word0.set_context_entries(1);
         self.memory
-            .write_slot(slot, (speed.psi() << 20) | (1 << 27))
+            .write_slot(slot, word0.raw())
             .ok_or("the input context is too small")?;
+
+        let mut word1 = SlotContext1::new(
+            self.memory
+                .read_slot(slot + 1)
+                .ok_or("the input context is too small")?,
+        );
+        word1.set_root_hub_port(port);
         self.memory
-            .write_slot(slot + 1, port << 16)
+            .write_slot(slot + 1, word1.raw())
             .ok_or("the input context is too small")?;
         Ok(())
     }
@@ -644,9 +746,19 @@ impl InputContext {
     /// Endpoint 0: control, three retries, its packet size and its ring.
     fn set_endpoint0(&mut self, max_packet: u16, ring: u64) -> Result<()> {
         let ep0 = 2 * (CONTEXT_SIZE / 4);
+        let mut word1 = EndpointContext1::new(
+            self.memory
+                .read_slot(ep0 + 1)
+                .ok_or("the input context is too small")?,
+        );
+        word1.set_max_packet(u32::from(max_packet));
+        // Endpoint type 4 is a control endpoint.
+        word1.set_ep_type(4);
+        word1.set_cerr(3);
         self.memory
-            .write_slot(ep0 + 1, (u32::from(max_packet) << 16) | (4 << 3) | (3 << 1))
+            .write_slot(ep0 + 1, word1.raw())
             .ok_or("the input context is too small")?;
+
         // The dequeue pointer keeps its low four bits for the cycle state.
         self.memory
             .write_slot(ep0 + 2, (ring as u32 & !0xf) | 1)
@@ -654,9 +766,16 @@ impl InputContext {
         self.memory
             .write_slot(ep0 + 3, (ring >> 32) as u32)
             .ok_or("the input context is too small")?;
+
+        let mut word4 = EndpointContext4::new(
+            self.memory
+                .read_slot(ep0 + 4)
+                .ok_or("the input context is too small")?,
+        );
         // Control endpoints use an average TRB length of 8.
+        word4.set_average_trb_length(8);
         self.memory
-            .write_slot(ep0 + 4, 8)
+            .write_slot(ep0 + 4, word4.raw())
             .ok_or("the input context is too small")?;
         Ok(())
     }
@@ -859,10 +978,10 @@ impl HostController {
         }
         // The controller writes the device context, and the slot context's last
         // word carries the address it assigned.
-        let slot_status = context.read_slot(11).unwrap_or(0);
+        let slot_context = SlotContext3::new(context.read_slot(11).unwrap_or(0));
         info!(
             "xhci: slot {slot} has device address {}",
-            slot_status & 0xff
+            slot_context.device_address()
         );
         self.devices.push(Device {
             slot,
