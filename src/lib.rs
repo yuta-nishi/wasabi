@@ -4,6 +4,7 @@ extern crate alloc;
 
 pub mod acpi;
 pub mod allocator;
+pub mod bitfield;
 pub mod console;
 pub mod debug;
 pub mod demo;

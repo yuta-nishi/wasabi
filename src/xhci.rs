@@ -1,3 +1,4 @@
+use crate::bitfield;
 use crate::info;
 use crate::iobox::IoBox;
 use crate::iobox::Zeroable;
@@ -27,21 +28,114 @@ const CONFIG: usize = 0x38;
 /// Port register set, relative to `CAPLENGTH`; each port owns 0x10 bytes.
 const PORT_REGISTERS: usize = 0x400;
 const PORT_SIZE: usize = 0x10;
-/// PORTSC: a device is attached (`CCS`) and the port is enabled (`PED`).
-const PORTSC_CONNECTED: u32 = 1 << 0;
-const PORTSC_ENABLED: u32 = 1 << 1;
-/// PORTSC: writing 1 starts a reset (`PR`).
-const PORTSC_RESET: u32 = 1 << 4;
-/// PORTSC: change bits, cleared by writing 1.
-const PORTSC_CONNECT_CHANGED: u32 = 1 << 17;
-const PORTSC_RESET_CHANGED: u32 = 1 << 21;
-const PORTSC_CHANGES: u32 = PORTSC_CONNECT_CHANGED
-    | PORTSC_RESET_CHANGED
-    | (1 << 18)
-    | (1 << 19)
-    | (1 << 20)
-    | (1 << 22)
-    | (1 << 23);
+bitfield! {
+    /// `PORTSC`: a port's status and control word.
+    Portsc {
+        connected: 0, 0,
+        enabled: 1, 1,
+        reset: 4, 4,
+        link_state: 8, 5,
+        power: 9, 9,
+        speed: 13, 10,
+        connect_changed: 17, 17,
+        reset_changed: 21, 21,
+    }
+}
+
+impl Portsc {
+    /// The change bits: writing 1 to one clears it.
+    fn changes() -> u32 {
+        Self::mask(17, 17)
+            | Self::mask(18, 18)
+            | Self::mask(19, 19)
+            | Self::mask(20, 20)
+            | Self::mask(21, 21)
+            | Self::mask(22, 22)
+            | Self::mask(23, 23)
+    }
+
+    /// Asks the controller to reset the port.
+    fn request_reset(&mut self) {
+        self.set_raw(self.raw() | Self::mask(4, 4) | Self::mask(17, 17));
+    }
+
+    /// Clears every change bit that is set.
+    fn acknowledge_changes(&mut self) {
+        self.set_raw(self.raw() | Self::changes());
+    }
+}
+
+/// The speed a port reports, as the slot context wants it (protocol speed ID).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Speed {
+    Full,
+    Low,
+    High,
+    Super,
+}
+
+impl Speed {
+    pub fn from_portsc(raw: u32) -> Option<Self> {
+        match raw {
+            1 => Some(Self::Full),
+            2 => Some(Self::Low),
+            3 => Some(Self::High),
+            4 => Some(Self::Super),
+            _ => None,
+        }
+    }
+
+    /// The value the slot context carries.
+    pub fn psi(self) -> u32 {
+        match self {
+            Self::Full => 1,
+            Self::Low => 2,
+            Self::High => 3,
+            Self::Super => 4,
+        }
+    }
+
+    /// The largest control packet at this speed.
+    pub fn max_packet_size(self) -> u16 {
+        match self {
+            Self::Full | Self::Low => 8,
+            Self::High => 64,
+            Self::Super => 512,
+        }
+    }
+}
+
+/// The code a completion event carries (xHCI specification, table 6-96).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum CompletionCode {
+    Success,
+    TrbError,
+    SlotNotEnabled,
+    EndpointNotEnabled,
+    ParameterError,
+    ContextStateError,
+    EventRingFull,
+    CommandRingStopped,
+    CommandAborted,
+    Other(u32),
+}
+
+impl CompletionCode {
+    pub fn from_raw(raw: u32) -> Self {
+        match raw {
+            1 => Self::Success,
+            5 => Self::TrbError,
+            11 => Self::SlotNotEnabled,
+            12 => Self::EndpointNotEnabled,
+            17 => Self::ParameterError,
+            19 => Self::ContextStateError,
+            21 => Self::EventRingFull,
+            24 => Self::CommandRingStopped,
+            25 => Self::CommandAborted,
+            other => Self::Other(other),
+        }
+    }
+}
 
 /// `Enable Slot` (TRB type 9): the controller picks a slot for a device.
 const TRB_ENABLE_SLOT: u32 = 9;
@@ -99,15 +193,13 @@ const TRB_LINK: u32 = 6;
 const TRB_COMMAND_COMPLETION: u32 = 33;
 /// `Port Status Change Event` (TRB type 34): a port changed on its own.
 const TRB_PORT_STATUS_CHANGE: u32 = 34;
-/// Completion code 1: success.
-const COMPLETION_SUCCESS: u32 = 1;
 
 fn trb_type(trb: &Trb) -> u32 {
     (trb.control >> 10) & 0x3f
 }
 
-fn completion_code(trb: &Trb) -> u32 {
-    (trb.status >> 24) & 0xff
+fn completion_code(trb: &Trb) -> CompletionCode {
+    CompletionCode::from_raw((trb.status >> 24) & 0xff)
 }
 
 /// The slot a completion event was about.
@@ -358,34 +450,36 @@ impl Ports {
         self.count
     }
 
-    fn status(&self, port: u32) -> u32 {
-        self.registers.port_status(port).read()
+    fn status(&self, port: u32) -> Portsc {
+        Portsc::new(self.registers.port_status(port).read())
     }
 
     /// Acknowledges the change bits a port has set.
-    fn acknowledge(&self, port: u32, status: u32) {
-        self.registers
-            .port_status(port)
-            .write(status | PORTSC_CHANGES);
+    fn acknowledge(&self, port: u32, mut status: Portsc) {
+        status.acknowledge_changes();
+        self.registers.port_status(port).write(status.raw());
     }
 
     /// Resets `port` and waits until the device is enabled, so it can be
     /// addressed.
     fn reset(&self, port: u32) -> Result<()> {
         let status = self.registers.port_status(port);
-        let current = status.read();
-        if current & PORTSC_CONNECTED == 0 {
+        let mut current = Portsc::new(status.read());
+        if current.connected() == 0 {
             return Err("no device on the port");
         }
-        status.write(current | PORTSC_CHANGES);
-        status.write(status.read() | PORTSC_RESET | PORTSC_CONNECT_CHANGED);
+        current.acknowledge_changes();
+        status.write(current.raw());
+        current.request_reset();
+        status.write(current.raw());
 
         let deadline = timer::nanoseconds() + TIMEOUT_MS * 1_000_000;
         loop {
-            let current = status.read();
-            if current & PORTSC_RESET_CHANGED != 0 {
-                status.write(current | PORTSC_CHANGES);
-                if status.read() & PORTSC_ENABLED == 0 {
+            let mut current = Portsc::new(status.read());
+            if current.reset_changed() != 0 {
+                current.acknowledge_changes();
+                status.write(current.raw());
+                if Portsc::new(status.read()).enabled() == 0 {
                     return Err("the port did not become enabled");
                 }
                 return Ok(());
@@ -397,24 +491,10 @@ impl Ports {
         }
     }
 
-    /// The protocol speed ID the port reports (`PORTSC` bits 13..10).
-    fn speed(&self, port: u32) -> Result<u32> {
-        let speed = (self.status(port) >> 10) & 0xf;
-        if (1..=4).contains(&speed) {
-            Ok(speed)
-        } else {
-            Err("the port reports an unknown speed")
-        }
-    }
-
-    /// The largest packet a control endpoint may use at that speed.
-    fn max_packet_size(speed: u32) -> Result<u16> {
-        match speed {
-            1 | 2 => Ok(8),
-            3 => Ok(64),
-            4 => Ok(512),
-            _ => Err("the port reports an unknown speed"),
-        }
+    /// The speed the port reports.
+    fn speed(&self, port: u32) -> Result<Speed> {
+        Speed::from_portsc(self.status(port).speed())
+            .ok_or("the port reports an unknown speed")
     }
 }
 
@@ -550,10 +630,10 @@ impl InputContext {
     }
 
     /// Speed, one context entry, and the root hub port the device sits behind.
-    fn set_slot(&mut self, speed: u32, port: u32) -> Result<()> {
+    fn set_slot(&mut self, speed: Speed, port: u32) -> Result<()> {
         let slot = CONTEXT_SIZE / 4;
         self.memory
-            .write_slot(slot, (speed << 20) | (1 << 27))
+            .write_slot(slot, (speed.psi() << 20) | (1 << 27))
             .ok_or("the input context is too small")?;
         self.memory
             .write_slot(slot + 1, port << 16)
@@ -698,7 +778,7 @@ impl HostController {
         let trb = Trb::no_op_command(self.commands.cycle());
         self.commands.send(&self.registers, trb)?;
         let event = self.events.wait_for_completion(&self.registers)?;
-        if completion_code(&event) != COMPLETION_SUCCESS {
+        if completion_code(&event) != CompletionCode::Success {
             return Err("the no-op command did not complete successfully");
         }
         info!("xhci: started, and the no-op command completed");
@@ -710,16 +790,22 @@ impl HostController {
     pub fn enumerate_ports(&mut self, tables: &mut PageTables) -> Result<()> {
         for port in 1..=self.ports.count() {
             let status = self.ports.status(port);
-            if status & PORTSC_CONNECTED == 0 {
+            if status.connected() == 0 {
                 continue;
             }
             self.ports.acknowledge(port, status);
-            info!("xhci: port {port} has a device (portsc {status:#010x})");
+            info!(
+                "xhci: port {port} has a device (portsc {:#010x})",
+                status.raw()
+            );
             self.ports.reset(port)?;
             let after = self.ports.status(port);
             // Slot type 0 is a USB2 device; a SuperSpeed port asks for type 1.
             let slot = self.enable_slot(0)?;
-            info!("xhci: port {port} reset (portsc {after:#010x}), slot {slot} assigned");
+            info!(
+                "xhci: port {port} reset (portsc {:#010x}), slot {slot} assigned",
+                after.raw()
+            );
             self.address_device(tables, slot, port)?;
         }
         for device in &self.devices {
@@ -738,7 +824,7 @@ impl HostController {
         let trb = Trb::enable_slot(self.commands.cycle(), slot_type);
         self.commands.send(&self.registers, trb)?;
         let event = self.events.wait_for_completion(&self.registers)?;
-        if completion_code(&event) != COMPLETION_SUCCESS {
+        if completion_code(&event) != CompletionCode::Success {
             return Err("the enable slot command failed");
         }
         Ok(slot_id(&event))
@@ -753,7 +839,7 @@ impl HostController {
         port: u32,
     ) -> Result<()> {
         let speed = self.ports.speed(port)?;
-        let max_packet = Ports::max_packet_size(speed)?;
+        let max_packet = speed.max_packet_size();
         let ep0 = Ring::<RING_TRBS>::new(tables);
         let mut input = InputContext::new(tables);
         let context = IoBox::<[u32; CONTEXT_WORDS]>::new(tables);
@@ -768,7 +854,7 @@ impl HostController {
         let trb = Trb::address_device(input.address(), slot, self.commands.cycle());
         self.commands.send(&self.registers, trb)?;
         let event = self.events.wait_for_completion(&self.registers)?;
-        if completion_code(&event) != COMPLETION_SUCCESS {
+        if completion_code(&event) != CompletionCode::Success {
             return Err("the address device command failed");
         }
         // The controller writes the device context, and the slot context's last

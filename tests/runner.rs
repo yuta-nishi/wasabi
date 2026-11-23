@@ -19,6 +19,8 @@ mod mutex;
 mod paging;
 #[path = "runner/timer.rs"]
 mod timer;
+#[path = "runner/xhci.rs"]
+mod xhci;
 
 use core::panic::PanicInfo;
 use wasabi::error;
@@ -138,6 +140,22 @@ extern "efiapi" fn efi_main(
             mutex::mutex_guards_can_be_taken_again_after_dropping,
         ),
         ("mutex_is_shareable", mutex::mutex_is_shareable),
+        (
+            "portsc_fields_come_out_of_the_word",
+            xhci::portsc_fields_come_out_of_the_word,
+        ),
+        (
+            "a_reset_port_reads_as_enabled",
+            xhci::a_reset_port_reads_as_enabled,
+        ),
+        (
+            "speed_maps_to_the_slot_context_value",
+            xhci::speed_maps_to_the_slot_context_value,
+        ),
+        (
+            "completion_codes_carry_names",
+            xhci::completion_codes_carry_names,
+        ),
     ])
 }
 
