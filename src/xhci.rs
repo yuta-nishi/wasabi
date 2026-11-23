@@ -251,6 +251,7 @@ pub enum TrbType {
     StatusStage,
     Link,
     EnableSlot,
+    DisableSlot,
     AddressDevice,
     NoOpCommand,
     TransferEvent,
@@ -267,6 +268,7 @@ impl TrbType {
             Self::StatusStage => 4,
             Self::Link => 6,
             Self::EnableSlot => 9,
+            Self::DisableSlot => 10,
             Self::AddressDevice => 11,
             Self::NoOpCommand => 23,
             Self::TransferEvent => 32,
@@ -283,6 +285,7 @@ impl TrbType {
             4 => Self::StatusStage,
             6 => Self::Link,
             9 => Self::EnableSlot,
+            10 => Self::DisableSlot,
             11 => Self::AddressDevice,
             23 => Self::NoOpCommand,
             32 => Self::TransferEvent,
@@ -332,6 +335,14 @@ impl Trb {
             control: (TrbType::AddressDevice.raw() << 10)
                 | (slot << 24)
                 | u32::from(cycle),
+        }
+    }
+
+    /// `Disable Slot`: frees a slot the device was using.
+    fn disable_slot(slot: u32, cycle: bool) -> Self {
+        Self {
+            control: (TrbType::DisableSlot.raw() << 10) | (slot << 24) | u32::from(cycle),
+            ..Self::default()
         }
     }
 
@@ -659,7 +670,9 @@ impl Ports {
 struct Device {
     slot: u32,
     port: u32,
-    /// The endpoint 0 ring: control transfers go through it.
+    /// The endpoint 0 ring: control transfers go through it. Held until the
+    /// transfers of the next chapter use it.
+    #[allow(dead_code)]
     endpoint0_ring: Ring<RING_TRBS>,
     /// Where the controller keeps the device's contexts.
     _device_context: IoBox<[u32; CONTEXT_WORDS]>,
@@ -1071,14 +1084,6 @@ impl HostController {
             after.raw()
         );
         self.address_device(tables, slot, port).await?;
-        if let Some(device) = self.devices.last() {
-            info!(
-                "xhci: slot {} on port {} addressed, endpoint 0 ring at {:#018x}",
-                device.slot,
-                device.port,
-                device.endpoint0_ring.address()
-            );
-        }
         Ok(())
     }
 
@@ -1111,13 +1116,33 @@ impl HostController {
         let status = self.ports.status(port);
         self.ports.acknowledge(port, status);
         if status.connected() == 0 {
-            info!("xhci: port {port} lost its device");
+            if let Some(position) =
+                self.devices.iter().position(|device| device.port == port)
+            {
+                let device = self.devices.remove(position);
+                self.disable_slot(device.slot).await?;
+                info!(
+                    "xhci: port {port} lost its device, slot {} freed",
+                    device.slot
+                );
+            }
             return Ok(());
         }
         if self.devices.iter().any(|device| device.port == port) {
             return Ok(());
         }
         self.attach_device(tables, port).await
+    }
+
+    /// Frees the slot a device was using.
+    async fn disable_slot(&mut self, slot: u32) -> Result<()> {
+        let trb = Trb::disable_slot(slot, self.commands.cycle_state());
+        self.commands.send(&self.registers, trb)?;
+        let event = self.events.wait_for_completion(&self.registers).await?;
+        if completion_code(&event) != CompletionCode::Success {
+            return Err("the disable slot command failed");
+        }
+        Ok(())
     }
 
     /// Asks the controller for a slot, which is where a device's contexts live.

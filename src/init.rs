@@ -81,14 +81,6 @@ pub fn init_pci(
     // Without these bits the controller ignores the register window and cannot
     // read the rings, which is everything the driver does.
     pci.enable(xhci);
-    info!("pci: xHCI command register is {:#06x}", pci.command(xhci));
-    // SAFETY: the window is mapped above and holds the controller's registers.
-    let capability = unsafe { core::ptr::read_volatile(address as *const u32) };
-    info!(
-        "pci: xHCI capability {capability:#010x} (caplength {:#04x}, version {:#06x})",
-        (capability & 0xff) as u8,
-        ((capability >> 16) & 0xffff) as u16
-    );
     Registers::new(address)
 }
 
