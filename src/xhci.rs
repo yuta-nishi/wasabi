@@ -8,26 +8,104 @@ use crate::paging::PageTables;
 use crate::result::Result;
 use crate::timer;
 use alloc::vec::Vec;
+use core::mem::offset_of;
+use core::mem::size_of;
 
-/// Generic capability register offsets.
-const CAPLENGTH: usize = 0x00;
-const HCSPARAMS1: usize = 0x04;
-const HCSPARAMS2: usize = 0x08;
-const HCCPARAMS1: usize = 0x10;
-const DBOFF: usize = 0x14;
-const RTSOFF: usize = 0x18;
+/// The capability registers, starting at the window's first byte.
+#[repr(C)]
+struct Capability {
+    caplength_and_version: u32,
+    hcsparams1: u32,
+    hcsparams2: u32,
+    hcsparams3: u32,
+    hccparams1: u32,
+    dboff: u32,
+    rtsoff: u32,
+    hccparams2: u32,
+}
 
-/// Operational register offsets, relative to `CAPLENGTH`.
-const USBCMD: usize = 0x00;
-const USBSTS: usize = 0x04;
-const PAGESIZE: usize = 0x08;
-const CRCR: usize = 0x18;
-const DCBAAP: usize = 0x30;
-const CONFIG: usize = 0x38;
+/// The operational registers, starting at `CAPLENGTH`.
+#[repr(C)]
+struct Operational {
+    usbcmd: u32,
+    usbsts: u32,
+    pagesize: u32,
+    _reserved0c: u32,
+    dnctrl: u32,
+    _reserved10: u32,
+    crcr: u64,
+    _reserved20: [u32; 4],
+    dcbaap: u64,
+    config: u32,
+    _reserved3c: u32,
+}
+const _: () = assert!(offset_of!(Capability, hcsparams1) == 0x04);
+const _: () = assert!(offset_of!(Capability, hccparams1) == 0x10);
+const _: () = assert!(offset_of!(Capability, dboff) == 0x14);
+const _: () = assert!(offset_of!(Capability, rtsoff) == 0x18);
+const _: () = assert!(size_of::<Operational>() == 0x40);
+const _: () = assert!(offset_of!(Operational, crcr) == 0x18);
+const _: () = assert!(offset_of!(Operational, dcbaap) == 0x30);
+const _: () = assert!(offset_of!(Operational, config) == 0x38);
 
-/// Port register set, relative to `CAPLENGTH`; each port owns 0x10 bytes.
+/// One interrupter's runtime registers.
+#[repr(C)]
+struct Interrupter {
+    iman: u32,
+    imod: u32,
+    erstsz: u32,
+    _reserved0c: u32,
+    erstba: u64,
+    erdp: u64,
+}
+
+/// The runtime registers: a microframe counter, then the interrupters.
+#[repr(C)]
+struct Runtime {
+    microframe_index: u32,
+    _reserved: [u32; 7],
+    interrupter0: Interrupter,
+}
+const _: () = assert!(offset_of!(Runtime, interrupter0) == 0x20);
+const _: () = assert!(offset_of!(Interrupter, erstsz) == 0x08);
+const _: () = assert!(offset_of!(Interrupter, erstba) == 0x10);
+const _: () = assert!(offset_of!(Interrupter, erdp) == 0x18);
+
+/// Where the port register set starts, relative to `CAPLENGTH`.
 const PORT_REGISTERS: usize = 0x400;
-const PORT_SIZE: usize = 0x10;
+/// One port's register set.
+#[repr(C)]
+struct Port {
+    portsc: u32,
+    portpmsc: u32,
+    portli: u32,
+    porthlpmc: u32,
+}
+const _: () = assert!(size_of::<Port>() == 0x10);
+
+bitfield! {
+    /// `USBCMD`: whether the controller runs, and whether it is reset.
+    UsbCmd {
+        run: 0, 0 -> set_run,
+        reset: 1, 1 -> set_reset,
+    }
+}
+
+bitfield! {
+    /// `USBSTS`: what the controller is doing.
+    UsbSts {
+        halted: 0, 0,
+        not_ready: 11, 11,
+    }
+}
+
+bitfield! {
+    /// `HCCPARAMS1`: what the controller supports.
+    HccParams1 {
+        context_size: 2, 2,
+    }
+}
+
 bitfield! {
     /// `PORTSC`: a port's status and control word.
     Portsc {
@@ -140,21 +218,7 @@ impl CompletionCode {
 /// 32-byte contexts: one slot context, one endpoint context per endpoint.
 const CONTEXT_SIZE: usize = 0x20;
 /// Words in a page of contexts.
-const CONTEXT_WORDS: usize = 1024;
-/// `HCCPARAMS1`: context size, 0 for 32 bytes and 1 for 64.
-const HCC_CONTEXT_SIZE: u32 = 1 << 2;
-
-/// Runtime registers of interrupter 0, relative to `RTSOFF`.
-const INTERRUPTER0: usize = 0x20;
-const ERSTSZ: usize = 0x08;
-const ERSTBA: usize = 0x10;
-const ERDP: usize = 0x18;
-
-const USBCMD_RUN: u32 = 1 << 0;
-const USBCMD_RESET: u32 = 1 << 1;
-const USBSTS_HALTED: u32 = 1 << 0;
-const USBSTS_NOT_READY: u32 = 1 << 11;
-
+const CONTEXT_WORDS: usize = crate::paging::PAGE_SIZE as usize / 4;
 /// How long to wait for the controller to reach a state, in milliseconds.
 const TIMEOUT_MS: u64 = 100;
 /// TRBs in the command ring and in the event ring segment.
@@ -321,12 +385,16 @@ impl Registers {
         // SAFETY: `window` is the controller's register window, mapped uncached
         // by the caller.
         let window = unsafe { Window::new(window) };
-        let caplength = u64::from(window.at::<u8>(CAPLENGTH).read());
+        let caplength = u64::from(
+            window
+                .at::<u8>(offset_of!(Capability, caplength_and_version))
+                .read(),
+        );
         if caplength == 0 {
             return Err("the xHCI controller reports a zero CAPLENGTH");
         }
-        let dboff = u64::from(window.at::<u32>(DBOFF).read());
-        let rtsoff = u64::from(window.at::<u32>(RTSOFF).read());
+        let dboff = u64::from(window.at::<u32>(offset_of!(Capability, dboff)).read());
+        let rtsoff = u64::from(window.at::<u32>(offset_of!(Capability, rtsoff)).read());
         Ok(Self {
             window,
             caplength,
@@ -347,7 +415,8 @@ impl Registers {
 
     /// One of interrupter 0's runtime registers, relative to `RTSOFF`.
     fn runtime<T: Copy>(&self, offset: usize) -> Mmio<T> {
-        self.window.at(self.rtsoff as usize + INTERRUPTER0 + offset)
+        self.window
+            .at(self.rtsoff as usize + offset_of!(Runtime, interrupter0) + offset)
     }
 
     /// One entry of the doorbell array, relative to `DBOFF`.
@@ -357,7 +426,7 @@ impl Registers {
 
     /// The status register of port `port` (numbered from 1).
     fn port_status(&self, port: u32) -> Mmio<u32> {
-        let offset = PORT_REGISTERS + (port as usize - 1) * PORT_SIZE;
+        let offset = PORT_REGISTERS + (port as usize - 1) * size_of::<Port>();
         self.operational(offset)
     }
 
@@ -365,7 +434,50 @@ impl Registers {
     pub fn version(&self) -> u16 {
         // The capability dword holds CAPLENGTH, a reserved byte, then the
         // version, so read the whole dword and shift the version out.
-        (self.read_cap(CAPLENGTH) >> 16) as u16
+        (self.read_cap(offset_of!(Capability, caplength_and_version)) >> 16) as u16
+    }
+
+    fn capability_value(&self) -> Capability {
+        let _ = offset_of!(Capability, caplength_and_version);
+        Capability {
+            caplength_and_version: self
+                .read_cap(offset_of!(Capability, caplength_and_version)),
+            hcsparams1: self.read_cap(offset_of!(Capability, hcsparams1)),
+            hcsparams2: self.read_cap(offset_of!(Capability, hcsparams2)),
+            hcsparams3: self.read_cap(offset_of!(Capability, hcsparams3)),
+            hccparams1: self.read_cap(offset_of!(Capability, hccparams1)),
+            dboff: self.read_cap(offset_of!(Capability, dboff)),
+            rtsoff: self.read_cap(offset_of!(Capability, rtsoff)),
+            hccparams2: self.read_cap(offset_of!(Capability, hccparams2)),
+        }
+    }
+
+    fn usbcmd(&self) -> UsbCmd {
+        UsbCmd::new(self.read_op(offset_of!(Operational, usbcmd)))
+    }
+
+    fn set_usbcmd(&self, command: UsbCmd) {
+        self.write_op(offset_of!(Operational, usbcmd), command.raw());
+    }
+
+    fn usbsts(&self) -> UsbSts {
+        UsbSts::new(self.read_op(offset_of!(Operational, usbsts)))
+    }
+
+    /// Waits until `done` holds, or fails with `what` after the timeout.
+    fn wait_until(
+        &self,
+        what: &'static str,
+        mut done: impl FnMut() -> bool,
+    ) -> Result<()> {
+        let deadline = timer::nanoseconds() + TIMEOUT_MS * 1_000_000;
+        while !done() {
+            if timer::nanoseconds() >= deadline {
+                return Err(what);
+            }
+            core::hint::spin_loop();
+        }
+        Ok(())
     }
 
     fn read_cap(&self, offset: usize) -> u32 {
@@ -394,29 +506,6 @@ impl Registers {
 
     fn ring_doorbell(&self, slot: u32, target: u32) {
         self.doorbell(slot).write((target << 16) | slot);
-    }
-
-    /// Waits until `mask` is clear in `USBSTS`, or gives up.
-    fn wait_status_clear(&self, mask: u32) -> Result<()> {
-        let deadline = timer::nanoseconds() + TIMEOUT_MS * 1_000_000;
-        while self.read_op(USBSTS) & mask != 0 {
-            if timer::nanoseconds() >= deadline {
-                return Err("the xHCI controller did not reach the expected state");
-            }
-            core::hint::spin_loop();
-        }
-        Ok(())
-    }
-
-    fn wait_status_set(&self, mask: u32) -> Result<()> {
-        let deadline = timer::nanoseconds() + TIMEOUT_MS * 1_000_000;
-        while self.read_op(USBSTS) & mask == 0 {
-            if timer::nanoseconds() >= deadline {
-                return Err("the xHCI controller did not reach the expected state");
-            }
-            core::hint::spin_loop();
-        }
-        Ok(())
     }
 }
 
@@ -616,9 +705,9 @@ impl EventChannel {
                 },
             )
             .ok_or("the segment table has no room")?;
-        registers.write_rt(ERSTSZ, 1);
-        registers.write_rt64(ERSTBA, self.erst.address());
-        registers.write_rt64(ERDP, self.ring.address());
+        registers.write_rt(offset_of!(Interrupter, erstsz), 1);
+        registers.write_rt64(offset_of!(Interrupter, erstba), self.erst.address());
+        registers.write_rt64(offset_of!(Interrupter, erdp), self.ring.address());
         Ok(())
     }
 
@@ -628,7 +717,7 @@ impl EventChannel {
         loop {
             if let Some(event) = self.ring.dequeue() {
                 let dequeue = self.ring.address() + self.ring.offset();
-                registers.write_rt64(ERDP, dequeue);
+                registers.write_rt64(offset_of!(Interrupter, erdp), dequeue);
                 return Ok(event);
             }
             if timer::nanoseconds() >= deadline {
@@ -796,12 +885,12 @@ impl HostController {
     /// Takes the controller over: halt it, reset it, give it its rings and start
     /// it, then prove the whole chain with a no-op command.
     pub fn init(registers: Registers, tables: &mut PageTables) -> Result<Self> {
-        let hcsparams1 = registers.read_cap(HCSPARAMS1);
-        let max_slots = hcsparams1 & 0xff;
-        let max_interrupters = (hcsparams1 >> 8) & 0x7ff;
-        let max_ports = (hcsparams1 >> 24) & 0xff;
-        let scratchpad = scratchpad_count(registers.read_cap(HCSPARAMS2));
-        if registers.read_cap(HCCPARAMS1) & HCC_CONTEXT_SIZE != 0 {
+        let capability = registers.capability_value();
+        let max_slots = capability.hcsparams1 & 0xff;
+        let max_interrupters = (capability.hcsparams1 >> 8) & 0x7ff;
+        let max_ports = (capability.hcsparams1 >> 24) & 0xff;
+        let scratchpad = scratchpad_count(capability.hcsparams2);
+        if HccParams1::new(capability.hccparams1).context_size() != 0 {
             return Err("this driver only supports 32-byte contexts");
         }
         info!(
@@ -811,12 +900,23 @@ impl HostController {
 
         // The firmware may have left the controller running with its own rings;
         // stop it before taking them away.
-        registers.write_op(USBCMD, registers.read_op(USBCMD) & !USBCMD_RUN);
-        registers.wait_status_set(USBSTS_HALTED)?;
-        registers.write_op(USBCMD, registers.read_op(USBCMD) | USBCMD_RESET);
-        registers.wait_status_clear(USBCMD_RESET)?;
-        registers.wait_status_clear(USBSTS_NOT_READY)?;
-        registers.write_op(PAGESIZE, 1);
+        let mut command = registers.usbcmd();
+        command.set_run(0);
+        registers.set_usbcmd(command);
+        registers.wait_until("the controller did not stop", || {
+            registers.usbsts().halted() == 1
+        })?;
+
+        command = registers.usbcmd();
+        command.set_reset(1);
+        registers.set_usbcmd(command);
+        registers.wait_until("the controller did not finish resetting", || {
+            registers.usbcmd().reset() == 0
+        })?;
+        registers.wait_until("the controller is not ready", || {
+            registers.usbsts().not_ready() == 0
+        })?;
+        registers.write_op(offset_of!(Operational, pagesize), 1);
 
         let mut controller = Self {
             registers,
@@ -866,18 +966,25 @@ impl HostController {
                 .ok_or("the device context array is full")?;
             self._scratchpad = Some((buffers, pages));
         }
-        self.registers.write_op64(DCBAAP, self.dcbaa.address());
-        self.registers.write_op(CONFIG, max_slots & 0xff);
+        self.registers
+            .write_op64(offset_of!(Operational, dcbaap), self.dcbaa.address());
+        self.registers
+            .write_op(offset_of!(Operational, config), max_slots & 0xff);
         self.events.program(&self.registers)?;
         self.commands.link_to_start();
-        self.registers.write_op64(CRCR, self.commands.address() | 1);
+        self.registers
+            .write_op64(offset_of!(Operational, crcr), self.commands.address() | 1);
         Ok(())
     }
 
     fn start(&mut self) -> Result<()> {
+        let mut command = self.registers.usbcmd();
+        command.set_run(1);
+        self.registers.set_usbcmd(command);
         self.registers
-            .write_op(USBCMD, self.registers.read_op(USBCMD) | USBCMD_RUN);
-        self.registers.wait_status_clear(USBSTS_HALTED)
+            .wait_until("the controller did not start", || {
+                self.registers.usbsts().halted() == 0
+            })
     }
 
     /// The version the controller reports, in BCD.

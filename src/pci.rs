@@ -5,11 +5,28 @@ use crate::bitfield;
 use crate::info;
 use crate::result::Result;
 use core::fmt;
+use core::mem::offset_of;
 use core::ptr::read_volatile;
 use core::ptr::write_volatile;
 
-/// Offset of the command register in the standard header.
-const COMMAND: u16 = 0x04;
+/// The standard header of a function's configuration space.
+#[repr(C)]
+struct Header {
+    vendor: u16,
+    device: u16,
+    command: u16,
+    status: u16,
+    class: u32,
+    _reserved: u32,
+    bar0: u32,
+}
+const _: () = assert!(offset_of!(Header, vendor) == 0x00);
+const _: () = assert!(offset_of!(Header, device) == 0x02);
+const _: () = assert!(offset_of!(Header, command) == 0x04);
+const _: () = assert!(offset_of!(Header, class) == 0x08);
+const _: () = assert!(offset_of!(Header, bar0) == 0x10);
+/// A function may have six base address registers, four bytes each.
+const BAR_STRIDE: u16 = 4;
 
 bitfield! {
     /// The command register: what a function may do on the bus.
@@ -19,8 +36,6 @@ bitfield! {
         bus_master: 2, 2 -> set_bus_master,
     }
 }
-/// Offset of the first base address register; the six follow each other.
-const BAR0: u16 = 0x10;
 
 /// One of a function's six base address registers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -138,7 +153,7 @@ impl ConfigSpace {
     /// The command register (`0x04`): which spaces this function may decode and
     /// whether it may drive the bus by itself.
     pub fn command(&self, address: Address) -> u16 {
-        self.read_u16(address, COMMAND)
+        self.read_u16(address, offset_of!(Header, command) as u16)
     }
 
     /// Lets the function answer on its BAR window and start its own bus
@@ -147,16 +162,23 @@ impl ConfigSpace {
         let mut command = Command::new(u32::from(self.command(address)));
         command.set_memory_space(1);
         command.set_bus_master(1);
-        self.write_u16(address, COMMAND, command.raw() as u16);
+        self.write_u16(
+            address,
+            offset_of!(Header, command) as u16,
+            command.raw() as u16,
+        );
     }
 
     /// Vendor and device ID, or `None` when no function answers at `address`.
     pub fn vendor_and_device(&self, address: Address) -> Option<(u16, u16)> {
-        let vendor = self.read_u16(address, 0x00);
+        let vendor = self.read_u16(address, offset_of!(Header, vendor) as u16);
         if vendor == 0xffff {
             return None;
         }
-        Some((vendor, self.read_u16(address, 0x02)))
+        Some((
+            vendor,
+            self.read_u16(address, offset_of!(Header, device) as u16),
+        ))
     }
 
     /// The programming interface byte (`0x09`): for a USB controller, `0x30`
@@ -167,7 +189,7 @@ impl ConfigSpace {
 
     /// The class code and its subclass (header offset `0x0b` and `0x0a`).
     pub fn class(&self, address: Address) -> (u8, u8) {
-        let register = self.read_u32(address, 0x08);
+        let register = self.read_u32(address, offset_of!(Header, class) as u16);
         (
             ((register >> 24) & 0xff) as u8,
             ((register >> 16) & 0xff) as u8,
@@ -180,7 +202,7 @@ impl ConfigSpace {
     /// it is measured by writing all ones and reading back which bits the
     /// function keeps, then restoring what was there.
     pub fn bar(&self, address: Address, index: u8) -> Option<Bar> {
-        let offset = BAR0 + u16::from(index) * 4;
+        let offset = offset_of!(Header, bar0) as u16 + u16::from(index) * BAR_STRIDE;
         let low = self.read_u32(address, offset);
         if low & 0b1 == 0b1 {
             // I/O space: bits 2..1 are reserved zero, so they come back as 0.
