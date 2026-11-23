@@ -1,7 +1,7 @@
 use crate::result::Result;
 use core::cmp::min;
 
-pub trait Bitmap {
+pub trait FrameBuffer {
     fn bytes_per_pixel(&self) -> i64;
     fn pixels_per_line(&self) -> i64;
     fn width(&self) -> i64;
@@ -38,19 +38,19 @@ pub trait Bitmap {
 /// # Safety
 ///
 /// (x, y) must be a valid point in the buffer.
-unsafe fn unchecked_draw_point<T: Bitmap>(buf: &mut T, color: u32, x: i64, y: i64) {
+unsafe fn unchecked_draw_point<T: FrameBuffer>(buf: &mut T, color: u32, x: i64, y: i64) {
     // SAFETY: the caller guarantees that (x, y) is in range.
     unsafe {
         *buf.unchecked_pixel_at_mut(x, y) = color;
     }
 }
 
-fn draw_point<T: Bitmap>(buf: &mut T, color: u32, x: i64, y: i64) -> Result<()> {
+fn draw_point<T: FrameBuffer>(buf: &mut T, color: u32, x: i64, y: i64) -> Result<()> {
     *(buf.pixel_at_mut(x, y).ok_or("Out of Range")?) = color;
     Ok(())
 }
 
-pub fn fill_rect<T: Bitmap>(
+pub fn fill_rect<T: FrameBuffer>(
     buf: &mut T,
     color: u32,
     x: i64,
@@ -88,7 +88,7 @@ fn calc_slope_point(distance_a: i64, distance_b: i64, index: i64) -> Option<i64>
     }
 }
 
-fn draw_line<T: Bitmap>(
+fn draw_line<T: FrameBuffer>(
     buf: &mut T,
     color: u32,
     x0: i64,
@@ -149,7 +149,7 @@ fn lookup_font(c: char) -> Option<[[char; 8]; 16]> {
     None
 }
 
-pub fn draw_font_fg<T: Bitmap>(buf: &mut T, x: i64, y: i64, color: u32, c: char) {
+pub fn draw_font_fg<T: FrameBuffer>(buf: &mut T, x: i64, y: i64, color: u32, c: char) {
     if let Some(font) = lookup_font(c) {
         for (dy, row) in font.iter().enumerate() {
             for (dx, pixel) in row.iter().enumerate() {
@@ -163,13 +163,13 @@ pub fn draw_font_fg<T: Bitmap>(buf: &mut T, x: i64, y: i64, color: u32, c: char)
     }
 }
 
-pub fn draw_str_fg<T: Bitmap>(buf: &mut T, x: i64, y: i64, color: u32, s: &str) {
+pub fn draw_str_fg<T: FrameBuffer>(buf: &mut T, x: i64, y: i64, color: u32, s: &str) {
     for (i, c) in s.chars().enumerate() {
         draw_font_fg(buf, x + i as i64 * 8, y, color, c)
     }
 }
 
-pub fn draw_test_pattern<T: Bitmap>(buf: &mut T) {
+pub fn draw_test_pattern<T: FrameBuffer>(buf: &mut T) {
     let width = 128;
     let left = buf.width() - width - 1;
     let colors = [0x000000, 0xff0000, 0x00ff00, 0x0000ff];

@@ -1,6 +1,6 @@
 use super::boot_services::EfiSystemTable;
 use super::ffi::EfiGuid;
-use crate::graphics::Bitmap;
+use crate::graphics::FrameBuffer;
 use crate::result::Result;
 use core::mem::size_of;
 
@@ -59,7 +59,7 @@ pub struct VramBufferInfo {
     height: i64,
     pixels_per_line: i64,
 }
-impl Bitmap for VramBufferInfo {
+impl FrameBuffer for VramBufferInfo {
     fn bytes_per_pixel(&self) -> i64 {
         4
     }

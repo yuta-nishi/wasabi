@@ -19,7 +19,7 @@ pub struct Task {
     future: UnsafeCell<Pin<Box<dyn Future<Output = ()>>>>,
     woken: AtomicBool,
     /// Set once the future returned `Ready`; the executor must not poll it again.
-    done: AtomicBool,
+    finished: AtomicBool,
 }
 
 impl Task {
@@ -27,7 +27,7 @@ impl Task {
         Self {
             future: UnsafeCell::new(Box::pin(future)),
             woken: AtomicBool::new(true),
-            done: AtomicBool::new(false),
+            finished: AtomicBool::new(false),
         }
     }
 
@@ -35,7 +35,7 @@ impl Task {
     /// is never polled again: the state machine must not be resumed after it
     /// returned `Ready`.
     fn poll(self: &Arc<Self>) -> bool {
-        if self.done.load(Ordering::Acquire) {
+        if self.finished.load(Ordering::Acquire) {
             return false;
         }
         let waker = Waker::from(self.clone());
@@ -44,7 +44,7 @@ impl Task {
         // future is pinned, so handing out `&mut` here cannot alias a poll.
         let future = unsafe { &mut *self.future.get() };
         if future.as_mut().poll(&mut context).is_ready() {
-            self.done.store(true, Ordering::Release);
+            self.finished.store(true, Ordering::Release);
         }
         true
     }
@@ -110,7 +110,7 @@ impl Executor {
                 ran += 1;
             }
         }
-        tasks.retain(|task| !task.done.load(Ordering::Acquire));
+        tasks.retain(|task| !task.finished.load(Ordering::Acquire));
         let mut tasks_now = self.tasks.lock();
         tasks.extend(core::mem::take(&mut *tasks_now));
         *tasks_now = tasks;

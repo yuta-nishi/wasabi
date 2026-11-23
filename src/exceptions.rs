@@ -2,22 +2,16 @@ use crate::gdt::Gdt;
 use crate::gdt::KERNEL_CODE_SELECTOR;
 use crate::idt::Idt;
 use crate::info;
+use alloc::boxed::Box;
 
-/// Owns the tables the CPU points at. Dropping it would leave the CPU with
-/// dangling descriptors, so callers keep it alive for the rest of the run.
-pub struct Exceptions {
-    _gdt: Gdt,
-    _idt: Idt,
-}
-
-pub fn init() -> Exceptions {
-    let gdt = Gdt::new();
+/// Installs the tables the CPU points at.
+///
+/// They are leaked: the CPU keeps their addresses for the rest of the run, so
+/// dropping them would leave it with dangling descriptors.
+pub fn init() {
+    let gdt = Box::leak(Box::new(Gdt::new()));
     gdt.load();
-    let idt = Idt::new(KERNEL_CODE_SELECTOR);
+    let idt = Box::leak(Box::new(Idt::new(KERNEL_CODE_SELECTOR)));
     idt.load();
     info!("exceptions installed");
-    Exceptions {
-        _gdt: gdt,
-        _idt: idt,
-    }
 }

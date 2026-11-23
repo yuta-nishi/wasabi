@@ -1,6 +1,6 @@
 use crate::mutex::Mutex;
 use crate::serial::Serial;
-use crate::uefi::BitmapTextWriter;
+use crate::uefi::FrameBufferTextWriter;
 use crate::uefi::VramBufferInfo;
 use core::fmt;
 use core::fmt::Write;
@@ -35,7 +35,8 @@ fn screen_write(s: &str) {
         return;
     };
     let (cursor_x, cursor_y) = (screen.cursor_x, screen.cursor_y);
-    let mut writer = BitmapTextWriter::resume_at(&mut screen.buffer, cursor_x, cursor_y);
+    let mut writer =
+        FrameBufferTextWriter::resume_at(&mut screen.buffer, cursor_x, cursor_y);
     let _ = writer.write_str(s);
     (screen.cursor_x, screen.cursor_y) = writer.cursor();
 }

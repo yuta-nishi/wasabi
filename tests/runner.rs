@@ -43,7 +43,7 @@ extern "efiapi" fn efi_main(
     // frozen memory map, and the firmware is gone before we install our own
     // GDT/IDT (its interrupt handlers would not survive the switch).
     let _memory_map = init_basic_runtime(image_handle, efi_system_table);
-    let _exceptions = wasabi::exceptions::init();
+    wasabi::exceptions::init();
     wasabi::init::init_timer(efi_system_table).expect("initializing the timer failed");
 
     run_tests(&[

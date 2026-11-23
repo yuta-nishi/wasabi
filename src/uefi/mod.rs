@@ -9,7 +9,7 @@ pub use boot_services::EfiLoadedImageProtocol;
 pub use boot_services::EfiSystemTable;
 pub use boot_services::exit_from_efi_boot_services;
 pub use boot_services::locate_loaded_image_protocol;
-pub use console::BitmapTextWriter;
+pub use console::FrameBufferTextWriter;
 pub use ffi::EfiHandle;
 pub use ffi::EfiMemoryType;
 pub use ffi::EfiStatus;
