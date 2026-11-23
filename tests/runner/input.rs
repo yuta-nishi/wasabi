@@ -8,9 +8,8 @@ pub fn a_line_is_handed_over_when_enter_arrives() {
     assert_eq!(line.push(b'\r'), Some(&b"hello"[..]));
     // The buffer starts over, so the next Enter does not repeat the line.
     assert!(line.push(b'\r').is_none());
-}
 
-pub fn newline_ends_a_line_too() {
+    // A bare newline ends a line the same way.
     let mut line = Line::new();
     for byte in b"abc" {
         line.push(*byte);

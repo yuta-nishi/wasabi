@@ -48,26 +48,24 @@ pub fn trb_types_have_names() {
     assert_eq!(TrbType::from_raw(63), TrbType::Other(63));
 }
 
-pub fn slot_context_words_are_set_by_name() {
-    let mut word0 = SlotContext0::new(0);
-    word0.set_speed(Speed::High.psi());
-    word0.set_context_entries(1);
-    assert_eq!(word0.speed(), 3);
-    assert_eq!(word0.context_entries(), 1);
+pub fn context_words_use_the_specification_positions() {
+    let mut slot0 = SlotContext0::new(0);
+    slot0.set_speed(Speed::High.psi());
+    slot0.set_context_entries(1);
+    // Speed is bits 23..20, context entries are bits 31..27.
+    assert_eq!(slot0.raw(), (3 << 20) | (1 << 27));
 
-    let mut word1 = SlotContext1::new(0);
-    word1.set_root_hub_port(5);
-    assert_eq!(word1.root_hub_port(), 5);
-}
+    let mut slot1 = SlotContext1::new(0);
+    slot1.set_root_hub_port(5);
+    // The root hub port is bits 23..16.
+    assert_eq!(slot1.raw(), 5 << 16);
 
-pub fn endpoint_context_word_holds_the_control_settings() {
-    let mut word1 = EndpointContext1::new(0);
-    word1.set_max_packet(64);
-    word1.set_ep_type(4);
-    word1.set_cerr(3);
-    assert_eq!(word1.max_packet(), 64);
-    assert_eq!(word1.ep_type(), 4);
-    assert_eq!(word1.cerr(), 3);
+    let mut endpoint1 = EndpointContext1::new(0);
+    endpoint1.set_max_packet(64);
+    endpoint1.set_ep_type(4);
+    endpoint1.set_cerr(3);
+    // CErr is bits 2..1, the type bits 5..3, the packet size bits 31..16.
+    assert_eq!(endpoint1.raw(), (64 << 16) | (4 << 3) | (3 << 1));
 }
 
 pub fn pci_command_fields_are_named() {

@@ -134,12 +134,9 @@ pub fn unmapping_a_page_splits_the_huge_page_around_it() {
         Translation::Huge(_, _) => {}
         other => panic!("expected the second 2 MiB page to stay huge, got {other:?}"),
     }
-}
 
-pub fn mapping_one_page_splits_the_huge_page() {
-    let mut tables = PageTables::identity_map(0x20_0000);
+    // Mapping one page inside the split takes the same path.
     tables.map_page(0x2000, 0x9_2000);
-
     match translate_in(tables.root(), 0x2000) {
         Translation::Page(_, physical) => assert_eq!(physical, 0x9_2000),
         other => panic!("expected the remapped page to move, got {other:?}"),

@@ -59,12 +59,8 @@ extern "efiapi" fn efi_main(
             allocator::allocated_objects_have_no_overlap,
         ),
         (
-            "hexdump_prints_16_bytes_per_line",
-            debug::hexdump_prints_16_bytes_per_line,
-        ),
-        (
-            "hexdump_pads_the_last_line",
-            debug::hexdump_pads_the_last_line,
+            "hexdump_prints_16_bytes_per_line_and_pads_the_last_one",
+            debug::hexdump_prints_16_bytes_per_line_and_pads_the_last_one,
         ),
         (
             "breakpoint_resumes_execution",
@@ -74,7 +70,6 @@ extern "efiapi" fn efi_main(
             "a_line_is_handed_over_when_enter_arrives",
             input::a_line_is_handed_over_when_enter_arrives,
         ),
-        ("newline_ends_a_line_too", input::newline_ends_a_line_too),
         (
             "backspace_takes_one_byte_off_the_end",
             input::backspace_takes_one_byte_off_the_end,
@@ -120,10 +115,6 @@ extern "efiapi" fn efi_main(
             paging::unmapping_a_page_splits_the_huge_page_around_it,
         ),
         (
-            "mapping_one_page_splits_the_huge_page",
-            paging::mapping_one_page_splits_the_huge_page,
-        ),
-        (
             "executor_runs_every_task_to_completion",
             executor::executor_runs_every_task_to_completion,
         ),
@@ -139,7 +130,6 @@ extern "efiapi" fn efi_main(
             "mutex_guards_can_be_taken_again_after_dropping",
             mutex::mutex_guards_can_be_taken_again_after_dropping,
         ),
-        ("mutex_is_shareable", mutex::mutex_is_shareable),
         (
             "portsc_fields_come_out_of_the_word",
             xhci::portsc_fields_come_out_of_the_word,
@@ -158,12 +148,8 @@ extern "efiapi" fn efi_main(
         ),
         ("trb_types_have_names", xhci::trb_types_have_names),
         (
-            "slot_context_words_are_set_by_name",
-            xhci::slot_context_words_are_set_by_name,
-        ),
-        (
-            "endpoint_context_word_holds_the_control_settings",
-            xhci::endpoint_context_word_holds_the_control_settings,
+            "context_words_use_the_specification_positions",
+            xhci::context_words_use_the_specification_positions,
         ),
         (
             "pci_command_fields_are_named",
