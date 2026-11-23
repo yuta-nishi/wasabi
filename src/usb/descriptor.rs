@@ -9,6 +9,36 @@ fn u16_at(bytes: &[u8], offset: usize) -> u16 {
     u16::from_le_bytes([bytes[offset], bytes[offset + 1]])
 }
 
+/// One descriptor as it appears inside a configuration buffer.
+pub struct Raw<'a> {
+    pub kind: u8,
+    pub bytes: &'a [u8],
+}
+
+/// Walks the descriptors of a configuration, each starting with its length and
+/// its type (USB 2.0, 9.4).
+///
+/// A length that cannot be true (smaller than the two bytes it takes to describe
+/// itself, or longer than what is left) ends the walk.
+pub fn descriptors(mut bytes: &[u8]) -> impl Iterator<Item = Raw<'_>> {
+    core::iter::from_fn(move || {
+        if bytes.len() < 2 {
+            return None;
+        }
+        let length = usize::from(bytes[0]);
+        if length < 2 || length > bytes.len() {
+            bytes = &[];
+            return None;
+        }
+        let (head, rest) = bytes.split_at(length);
+        bytes = rest;
+        Some(Raw {
+            kind: head[1],
+            bytes: head,
+        })
+    })
+}
+
 /// What the device says it is (USB 2.0, 9.6.1).
 #[derive(Clone, Copy, Default, Debug)]
 pub struct DeviceDescriptor {
@@ -25,21 +55,30 @@ pub struct DeviceDescriptor {
 
 impl DeviceDescriptor {
     pub const LENGTH: usize = 18;
+    const USB_VERSION: usize = 2;
+    const CLASS: usize = 4;
+    const SUBCLASS: usize = 5;
+    const PROTOCOL: usize = 6;
+    const MAX_PACKET_SIZE: usize = 7;
+    const VENDOR_ID: usize = 8;
+    const PRODUCT_ID: usize = 10;
+    const DEVICE_VERSION: usize = 12;
+    const NUMBER_OF_CONFIGURATIONS: usize = 17;
 
     pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
         if bytes.len() < Self::LENGTH {
             return None;
         }
         Some(Self {
-            usb_version: u16_at(bytes, 2),
-            class: bytes[4],
-            subclass: bytes[5],
-            protocol: bytes[6],
-            max_packet_size: bytes[7],
-            vendor_id: u16_at(bytes, 8),
-            product_id: u16_at(bytes, 10),
-            device_version: u16_at(bytes, 12),
-            number_of_configurations: bytes[17],
+            usb_version: u16_at(bytes, Self::USB_VERSION),
+            class: bytes[Self::CLASS],
+            subclass: bytes[Self::SUBCLASS],
+            protocol: bytes[Self::PROTOCOL],
+            max_packet_size: bytes[Self::MAX_PACKET_SIZE],
+            vendor_id: u16_at(bytes, Self::VENDOR_ID),
+            product_id: u16_at(bytes, Self::PRODUCT_ID),
+            device_version: u16_at(bytes, Self::DEVICE_VERSION),
+            number_of_configurations: bytes[Self::NUMBER_OF_CONFIGURATIONS],
         })
     }
 }
@@ -56,17 +95,22 @@ pub struct ConfigurationDescriptor {
 
 impl ConfigurationDescriptor {
     pub const LENGTH: usize = 9;
+    const TOTAL_LENGTH: usize = 2;
+    const NUMBER_OF_INTERFACES: usize = 4;
+    const CONFIGURATION_VALUE: usize = 5;
+    const ATTRIBUTES: usize = 7;
+    const MAX_POWER: usize = 8;
 
     pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
         if bytes.len() < Self::LENGTH {
             return None;
         }
         Some(Self {
-            total_length: u16_at(bytes, 2),
-            number_of_interfaces: bytes[4],
-            configuration_value: bytes[5],
-            attributes: bytes[7],
-            max_power: bytes[8],
+            total_length: u16_at(bytes, Self::TOTAL_LENGTH),
+            number_of_interfaces: bytes[Self::NUMBER_OF_INTERFACES],
+            configuration_value: bytes[Self::CONFIGURATION_VALUE],
+            attributes: bytes[Self::ATTRIBUTES],
+            max_power: bytes[Self::MAX_POWER],
         })
     }
 }
@@ -85,18 +129,24 @@ pub struct InterfaceDescriptor {
 
 impl InterfaceDescriptor {
     pub const LENGTH: usize = 9;
+    const INTERFACE_NUMBER: usize = 2;
+    const ALTERNATE_SETTING: usize = 3;
+    const NUMBER_OF_ENDPOINTS: usize = 4;
+    const CLASS: usize = 5;
+    const SUBCLASS: usize = 6;
+    const PROTOCOL: usize = 7;
 
     pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
         if bytes.len() < Self::LENGTH {
             return None;
         }
         Some(Self {
-            interface_number: bytes[2],
-            alternate_setting: bytes[3],
-            number_of_endpoints: bytes[4],
-            class: bytes[5],
-            subclass: bytes[6],
-            protocol: bytes[7],
+            interface_number: bytes[Self::INTERFACE_NUMBER],
+            alternate_setting: bytes[Self::ALTERNATE_SETTING],
+            number_of_endpoints: bytes[Self::NUMBER_OF_ENDPOINTS],
+            class: bytes[Self::CLASS],
+            subclass: bytes[Self::SUBCLASS],
+            protocol: bytes[Self::PROTOCOL],
         })
     }
 }
@@ -112,16 +162,20 @@ pub struct EndpointDescriptor {
 
 impl EndpointDescriptor {
     pub const LENGTH: usize = 7;
+    const ADDRESS: usize = 2;
+    const ATTRIBUTES: usize = 3;
+    const MAX_PACKET_SIZE: usize = 4;
+    const INTERVAL: usize = 6;
 
     pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
         if bytes.len() < Self::LENGTH {
             return None;
         }
         Some(Self {
-            address: bytes[2],
-            attributes: bytes[3],
-            max_packet_size: u16_at(bytes, 4),
-            interval: bytes[6],
+            address: bytes[Self::ADDRESS],
+            attributes: bytes[Self::ATTRIBUTES],
+            max_packet_size: u16_at(bytes, Self::MAX_PACKET_SIZE),
+            interval: bytes[Self::INTERVAL],
         })
     }
 

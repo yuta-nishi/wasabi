@@ -15,6 +15,7 @@ use crate::usb::descriptor::ConfigurationDescriptor;
 use crate::usb::descriptor::DeviceDescriptor;
 use crate::usb::descriptor::EndpointDescriptor;
 use crate::usb::descriptor::InterfaceDescriptor;
+use crate::usb::descriptor::descriptors;
 use alloc::vec::Vec;
 use core::mem::offset_of;
 use core::mem::size_of;
@@ -1258,17 +1259,10 @@ impl HostController {
             configuration.total_length
         );
 
-        // Each descriptor starts with its length and its type.
-        let mut offset = 0;
-        while offset + 2 <= total_length {
-            let length = usize::from(bytes[offset]);
-            if length == 0 || offset + length > total_length {
-                break;
-            }
-            let descriptor = &bytes[offset..offset + length];
-            match descriptor[1] {
+        for raw in descriptors(bytes) {
+            match raw.kind {
                 descriptor::INTERFACE => {
-                    if let Some(interface) = InterfaceDescriptor::from_bytes(descriptor) {
+                    if let Some(interface) = InterfaceDescriptor::from_bytes(raw.bytes) {
                         info!(
                             "xhci: slot {slot} interface {}: class {}.{}.{}, {} endpoint(s)",
                             interface.interface_number,
@@ -1280,7 +1274,7 @@ impl HostController {
                     }
                 }
                 descriptor::ENDPOINT => {
-                    if let Some(endpoint) = EndpointDescriptor::from_bytes(descriptor) {
+                    if let Some(endpoint) = EndpointDescriptor::from_bytes(raw.bytes) {
                         info!(
                             "xhci: slot {slot} endpoint {:#04x}: {}, {} bytes every {}",
                             endpoint.address,
@@ -1295,7 +1289,6 @@ impl HostController {
                 }
                 _ => {}
             }
-            offset += length;
         }
         Ok(())
     }

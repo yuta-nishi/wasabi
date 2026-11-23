@@ -21,6 +21,8 @@ mod paging;
 mod pci;
 #[path = "runner/timer.rs"]
 mod timer;
+#[path = "runner/usb.rs"]
+mod usb;
 #[path = "runner/xhci.rs"]
 mod xhci;
 
@@ -147,6 +149,22 @@ extern "efiapi" fn efi_main(
         (
             "completion_codes_carry_names",
             xhci::completion_codes_carry_names,
+        ),
+        (
+            "the_device_descriptor_says_which_keyboard_it_is",
+            usb::the_device_descriptor_says_which_keyboard_it_is,
+        ),
+        (
+            "a_truncated_descriptor_is_rejected",
+            usb::a_truncated_descriptor_is_rejected,
+        ),
+        (
+            "the_configuration_holds_the_interface_and_the_endpoint",
+            usb::the_configuration_holds_the_interface_and_the_endpoint,
+        ),
+        (
+            "a_broken_length_ends_the_walk",
+            usb::a_broken_length_ends_the_walk,
         ),
         ("trb_types_have_names", xhci::trb_types_have_names),
         (
