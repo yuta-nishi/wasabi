@@ -20,7 +20,7 @@ use crate::uefi::exit_from_efi_boot_services;
 use crate::uefi::init_vram;
 use crate::warn;
 use crate::x86;
-use crate::xhci::HostController;
+
 use crate::xhci::Registers;
 use core::sync::atomic::Ordering;
 
@@ -92,13 +92,10 @@ pub fn init_pci(
     Registers::new(address)
 }
 
-/// Resets the xHCI controller, gives it its rings, starts it, and proves the
-/// command path with a no-op command.
-pub fn init_xhci(registers: Registers, tables: &mut PageTables) -> Result<()> {
-    let mut host = HostController::init(registers, tables)?;
-    info!("xhci: version {:#06x}", host.version());
-    host.enumerate_ports(tables)?;
-    Ok(())
+/// Hands the controller to a task: it proves the command path, addresses the
+/// devices already on the ports, and keeps watching for changes.
+pub fn init_xhci(registers: Registers, tables: PageTables) {
+    crate::xhci::start(registers, tables);
 }
 
 /// Programs COM1 and proves both directions work by looping a byte back.
