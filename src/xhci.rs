@@ -217,6 +217,9 @@ impl CompletionCode {
     }
 }
 
+/// A setup packet is eight bytes.
+const SETUP_LENGTH: usize = 8;
+
 /// 32-byte contexts: one slot context, one endpoint context per endpoint.
 const CONTEXT_SIZE: usize = 0x20;
 /// Words in a page of contexts.
@@ -302,7 +305,16 @@ bitfield! {
         cycle: 0, 0,
         link_toggle: 1, 1,
         trb_type: 15, 10,
+        endpoint: 20, 16,
         slot: 31, 24,
+    }
+}
+
+bitfield! {
+    /// The status dword of a transfer event: how much was left and how it went.
+    TransferEventStatus: u32 {
+        residual_length: 23, 0,
+        completion_code: 31, 24,
     }
 }
 
@@ -320,49 +332,78 @@ fn slot_id(trb: &Trb) -> u32 {
 }
 
 impl Trb {
-    fn no_op_command(cycle: bool) -> Self {
+    fn no_op_command() -> Self {
         Self {
-            control: (TrbType::NoOpCommand.raw() << 10) | u32::from(cycle),
+            control: TrbType::NoOpCommand.raw() << 10,
             ..Self::default()
         }
     }
 
     /// `Address Device`: the input context at `input` describes the device.
-    fn address_device(input: u64, slot: u32, cycle: bool) -> Self {
+    fn address_device(input_context: u64, slot: u32) -> Self {
         Self {
-            parameter: input,
+            parameter: input_context,
             status: 0,
-            control: (TrbType::AddressDevice.raw() << 10)
-                | (slot << 24)
-                | u32::from(cycle),
+            control: (TrbType::AddressDevice.raw() << 10) | (slot << 24),
         }
     }
 
     /// `Disable Slot`: frees a slot the device was using.
-    fn disable_slot(slot: u32, cycle: bool) -> Self {
+    fn disable_slot(slot: u32) -> Self {
         Self {
-            control: (TrbType::DisableSlot.raw() << 10) | (slot << 24) | u32::from(cycle),
+            control: (TrbType::DisableSlot.raw() << 10) | (slot << 24),
             ..Self::default()
         }
     }
 
     /// `Enable Slot`: the controller answers with the slot it picked.
-    fn enable_slot(cycle: bool, slot_type: u32) -> Self {
+    fn enable_slot(slot_type: u32) -> Self {
         Self {
-            control: (TrbType::EnableSlot.raw() << 10)
-                | (slot_type << 16)
-                | u32::from(cycle),
+            control: (TrbType::EnableSlot.raw() << 10) | (slot_type << 16),
             ..Self::default()
+        }
+    }
+
+    /// `Setup Stage` (TRB type 2): the eight request bytes travel in the TRB
+    /// itself, which is what the IDT bit says.
+    fn setup_stage(request: u64) -> Self {
+        Self {
+            parameter: request,
+            status: SETUP_LENGTH as u32,
+            control: (TrbType::SetupStage.raw() << 10) | (1 << 6),
+        }
+    }
+
+    /// `Data Stage` (TRB type 3): moves `length` bytes to or from `buffer`.
+    fn data_stage(buffer: u64, length: u32, direction_in: bool) -> Self {
+        Self {
+            parameter: buffer,
+            status: length,
+            control: (TrbType::DataStage.raw() << 10) | (u32::from(direction_in) << 16),
+        }
+    }
+
+    /// `Status Stage` (TRB type 4): the empty last stage of a control transfer.
+    ///
+    /// It carries Interrupt On Completion, so the controller reports the whole
+    /// transfer once this stage finishes.
+    fn status_stage(direction_in: bool) -> Self {
+        Self {
+            parameter: 0,
+            status: 0,
+            control: (TrbType::StatusStage.raw() << 10)
+                | (u32::from(direction_in) << 16)
+                | (1 << 5),
         }
     }
 
     /// Points the ring's last slot back at `ring` and flips the cycle state, so
     /// the controller can tell a fresh lap from the previous one.
-    fn link(ring: u64, cycle: bool) -> Self {
+    fn link(ring: u64) -> Self {
         Self {
             parameter: ring,
             status: 0,
-            control: (TrbType::Link.raw() << 10) | (1 << 1) | u32::from(cycle),
+            control: (TrbType::Link.raw() << 10) | (1 << 1),
         }
     }
 }
@@ -518,8 +559,13 @@ impl Registers {
         self.runtime::<u64>(offset).write(value);
     }
 
-    fn ring_doorbell(&self, slot: u32, target: u32) {
-        self.doorbell(slot).write((target << 16) | slot);
+    fn ring_command_doorbell(&self) {
+        self.doorbell(0).write(0);
+    }
+
+    /// Tells the controller that endpoint `endpoint` of `slot` has work.
+    fn ring_endpoint_doorbell(&self, slot: u32, endpoint: u32) {
+        self.doorbell(slot).write(endpoint);
     }
 }
 
@@ -570,15 +616,21 @@ impl<const N: usize> Ring<N> {
         (self.next_index * core::mem::size_of::<Trb>()) as u64
     }
 
-    /// Hands over one entry. The last slot is the link, so `N - 1` are usable and
-    /// a ring that fills up needs a lap the driver cannot start yet.
+    /// Hands over one entry, stamped with the cycle bit of the current lap.
+    ///
+    /// Reaching the link closes the lap: the link is rewritten for the new cycle
+    /// and the ring starts over at its first entry.
     fn enqueue(&mut self, trb: Trb) -> Result<()> {
-        if self.next_index + 1 >= N {
-            return Err("the command ring is full");
+        if self.next_index + 1 == N {
+            self.cycle_state = !self.cycle_state;
+            self.link_to_start();
+            self.next_index = 0;
         }
+        let mut trb = trb;
+        trb.control = (trb.control & !1) | u32::from(self.cycle_state);
         self.entries
             .write_slot(self.next_index, trb)
-            .ok_or("the command ring is full")?;
+            .ok_or("the ring has no room")?;
         self.next_index += 1;
         Ok(())
     }
@@ -599,7 +651,8 @@ impl<const N: usize> Ring<N> {
 
     /// Points the last slot back at the first, closing the ring.
     fn link_to_start(&mut self) {
-        let link = Trb::link(self.entries.address(), self.cycle_state);
+        let mut link = Trb::link(self.entries.address());
+        link.control |= u32::from(self.cycle_state);
         self.entries.write_slot(N - 1, link);
     }
 }
@@ -666,6 +719,27 @@ impl Ports {
     }
 }
 
+/// The 18-byte device descriptor (USB 2.0, 9.6.1).
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct DeviceDescriptor {
+    length: u8,
+    descriptor_type: u8,
+    usb_version: u16,
+    class: u8,
+    subclass: u8,
+    protocol: u8,
+    max_packet_size: u8,
+    vendor_id: u16,
+    product_id: u16,
+    device_version: u16,
+    manufacturer: u8,
+    product: u8,
+    serial_number: u8,
+    number_of_configurations: u8,
+}
+const _: () = assert!(core::mem::size_of::<DeviceDescriptor>() == 18);
+
 /// A device the controller has given an address to.
 struct Device {
     slot: u32,
@@ -696,18 +770,13 @@ impl CommandChannel {
         self.ring.address()
     }
 
-    /// The cycle bit the next command must carry.
-    fn cycle_state(&self) -> bool {
-        self.ring.cycle_state
-    }
-
     fn link_to_start(&mut self) {
         self.ring.link_to_start();
     }
 
     fn send(&mut self, registers: &Registers, trb: Trb) -> Result<()> {
         self.ring.enqueue(trb)?;
-        registers.ring_doorbell(0, 0);
+        registers.ring_command_doorbell();
         Ok(())
     }
 }
@@ -1045,7 +1114,7 @@ impl HostController {
     /// the doorbell, the command ring, the event ring and the completion path all
     /// work.
     async fn check_with_no_op(&mut self) -> Result<()> {
-        let trb = Trb::no_op_command(self.commands.cycle_state());
+        let trb = Trb::no_op_command();
         self.commands.send(&self.registers, trb)?;
         let event = self.events.wait_for_completion(&self.registers).await?;
         if completion_code(&event) != CompletionCode::Success {
@@ -1084,6 +1153,14 @@ impl HostController {
             after.raw()
         );
         self.address_device(tables, slot, port).await?;
+        let descriptor = self.read_device_descriptor(tables, slot).await?;
+        info!(
+            "xhci: slot {slot} is device {:#06x}:{:#06x}, class {:#04x}, {} configuration(s)",
+            descriptor.vendor_id,
+            descriptor.product_id,
+            descriptor.class,
+            descriptor.number_of_configurations
+        );
         Ok(())
     }
 
@@ -1134,9 +1211,77 @@ impl HostController {
         self.attach_device(tables, port).await
     }
 
+    /// Reads the device descriptor over endpoint 0.
+    async fn read_device_descriptor(
+        &mut self,
+        tables: &mut PageTables,
+        slot: u32,
+    ) -> Result<DeviceDescriptor> {
+        let buffer = IoBox::<[u8; 64]>::new(tables);
+        // GET_DESCRIPTOR: device to host, standard, device; type 1, index 0.
+        let request = 0x80u64 | 0x06u64 << 8 | 0x0100u64 << 16 | 18u64 << 48;
+        self.control_in(slot, request, buffer.address(), 18).await?;
+        // SAFETY: the controller wrote 18 bytes into the buffer, which is page
+        // aligned, and the descriptor only holds integers.
+        Ok(unsafe {
+            core::ptr::read_volatile(buffer.address() as *const DeviceDescriptor)
+        })
+    }
+
+    /// Sends a control-IN transfer on endpoint 0 and waits for it to finish.
+    async fn control_in(
+        &mut self,
+        slot: u32,
+        request: u64,
+        buffer: u64,
+        length: u32,
+    ) -> Result<()> {
+        let position = self
+            .devices
+            .iter()
+            .position(|device| device.slot == slot)
+            .ok_or("no device has that slot")?;
+        {
+            let ring = &mut self.devices[position].endpoint0_ring;
+            ring.enqueue(Trb::setup_stage(request))?;
+            ring.enqueue(Trb::data_stage(buffer, length, true))?;
+            ring.enqueue(Trb::status_stage(false))?;
+        }
+        // Endpoint 0 answers on doorbell `slot`, target DCI 1.
+        self.registers.ring_endpoint_doorbell(slot, 1);
+
+        let deadline = timer::nanoseconds() + TIMEOUT_MS * 1_000_000;
+        loop {
+            while let Some(event) = self.events.take(&self.registers) {
+                match trb_type(&event) {
+                    TrbType::TransferEvent => {
+                        let control = TrbControl::new(event.control);
+                        if control.slot() == slot && control.endpoint() == 1 {
+                            let status = TransferEventStatus::new(event.status);
+                            let code = CompletionCode::from_raw(status.completion_code());
+                            if code != CompletionCode::Success {
+                                error!("xhci: transfer failed with {code:?}");
+                                return Err("the control transfer failed");
+                            }
+                            return Ok(());
+                        }
+                    }
+                    TrbType::PortStatusChange => {
+                        self.events.port_changes.push(event.parameter as u32 >> 24);
+                    }
+                    other => info!("xhci: event {other:?} with nothing waiting for it"),
+                }
+            }
+            if timer::nanoseconds() >= deadline {
+                return Err("the control transfer timed out");
+            }
+            timer::sleep(core::time::Duration::from_millis(1)).await;
+        }
+    }
+
     /// Frees the slot a device was using.
     async fn disable_slot(&mut self, slot: u32) -> Result<()> {
-        let trb = Trb::disable_slot(slot, self.commands.cycle_state());
+        let trb = Trb::disable_slot(slot);
         self.commands.send(&self.registers, trb)?;
         let event = self.events.wait_for_completion(&self.registers).await?;
         if completion_code(&event) != CompletionCode::Success {
@@ -1147,7 +1292,7 @@ impl HostController {
 
     /// Asks the controller for a slot, which is where a device's contexts live.
     async fn enable_slot(&mut self, slot_type: u32) -> Result<u32> {
-        let trb = Trb::enable_slot(self.commands.cycle_state(), slot_type);
+        let trb = Trb::enable_slot(slot_type);
         self.commands.send(&self.registers, trb)?;
         let event = self.events.wait_for_completion(&self.registers).await?;
         if completion_code(&event) != CompletionCode::Success {
@@ -1177,11 +1322,7 @@ impl HostController {
             .write_slot(slot as usize, device_context.address())
             .ok_or("the device context array is full")?;
 
-        let trb = Trb::address_device(
-            input_context.address(),
-            slot,
-            self.commands.cycle_state(),
-        );
+        let trb = Trb::address_device(input_context.address(), slot);
         self.commands.send(&self.registers, trb)?;
         let event = self.events.wait_for_completion(&self.registers).await?;
         if completion_code(&event) != CompletionCode::Success {
