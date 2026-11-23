@@ -6,6 +6,7 @@ use crate::mmio::Window;
 use crate::paging::PageTables;
 use crate::result::Result;
 use crate::timer;
+use alloc::vec::Vec;
 
 /// Generic capability register offsets.
 const CAPLENGTH: usize = 0x00;
@@ -344,10 +345,7 @@ impl<const N: usize> Ring<N> {
 }
 
 /// The scratchpad buffers: the array of their addresses, and the pages it names.
-type Scratchpad = (
-    IoBox<[u64; MAX_SCRATCHPAD]>,
-    alloc::vec::Vec<IoBox<[u8; 4096]>>,
-);
+type Scratchpad = (IoBox<[u64; MAX_SCRATCHPAD]>, Vec<IoBox<[u8; 4096]>>);
 
 /// The root hub's ports and what they report.
 struct Ports {
@@ -592,7 +590,7 @@ pub struct HostController {
     ports: Ports,
     dcbaa: IoBox<[u64; MAX_SLOTS]>,
     _scratchpad: Option<Scratchpad>,
-    devices: alloc::vec::Vec<Device>,
+    devices: Vec<Device>,
 }
 
 impl HostController {
@@ -631,7 +629,7 @@ impl HostController {
             },
             dcbaa: IoBox::new(tables),
             _scratchpad: None,
-            devices: alloc::vec::Vec::new(),
+            devices: Vec::new(),
         };
         controller.program(max_slots, scratchpad, tables)?;
         controller.start()?;
@@ -656,7 +654,7 @@ impl HostController {
             // Entry 0 of the device context array is where the controller looks
             // for the scratchpad buffers it needs for its own work.
             let mut buffers = IoBox::<[u64; MAX_SCRATCHPAD]>::new(tables);
-            let mut pages = alloc::vec::Vec::new();
+            let mut pages = Vec::new();
             for index in 0..scratchpad as usize {
                 let page = IoBox::<[u8; 4096]>::new(tables);
                 buffers

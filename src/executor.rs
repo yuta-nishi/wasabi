@@ -3,6 +3,7 @@ use crate::mutex::Mutex;
 use crate::x86::hlt;
 use alloc::boxed::Box;
 use alloc::sync::Arc;
+use alloc::task::Wake;
 use alloc::vec::Vec;
 use core::cell::UnsafeCell;
 use core::future::Future;
@@ -55,7 +56,7 @@ unsafe impl Send for Task {}
 // SAFETY: as above; there is no OS thread that could race with the executor.
 unsafe impl Sync for Task {}
 
-impl alloc::task::Wake for Task {
+impl Wake for Task {
     fn wake(self: Arc<Self>) {
         self.woken.store(true, Ordering::Release);
     }
