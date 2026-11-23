@@ -76,13 +76,13 @@ pub fn fill_rect<T: Bitmap>(
     Ok(())
 }
 
-fn calc_slope_point(da: i64, db: i64, ia: i64) -> Option<i64> {
-    if da < db {
+fn calc_slope_point(distance_a: i64, distance_b: i64, index: i64) -> Option<i64> {
+    if distance_a < distance_b {
         None
-    } else if da == 0 {
+    } else if distance_a == 0 {
         Some(0)
-    } else if (0..=da).contains(&ia) {
-        Some((2 * db * ia + da) / da / 2)
+    } else if (0..=distance_a).contains(&index) {
+        Some((2 * distance_b * index + distance_a) / distance_a / 2)
     } else {
         None
     }
@@ -125,20 +125,20 @@ fn draw_line<T: Bitmap>(
 
 fn lookup_font(c: char) -> Option<[[char; 8]; 16]> {
     const FONT_SOURCE: &str = include_str!("./font.txt");
-    if let Ok(c) = u8::try_from(c) {
+    if let Ok(character) = u8::try_from(c) {
         let mut fi = FONT_SOURCE.split('\n');
         while let Some(line) = fi.next() {
             if let Some(line) = line.strip_prefix("0x")
                 && let Ok(idx) = u8::from_str_radix(line, 16)
             {
-                if idx != c {
+                if idx != character {
                     continue;
                 }
                 let mut font = [['*'; 8]; 16];
                 for (y, line) in fi.clone().take(16).enumerate() {
-                    for (x, c) in line.chars().enumerate() {
-                        if let Some(e) = font[y].get_mut(x) {
-                            *e = c;
+                    for (x, character) in line.chars().enumerate() {
+                        if let Some(pixel) = font[y].get_mut(x) {
+                            *pixel = character;
                         }
                     }
                 }
@@ -170,21 +170,34 @@ pub fn draw_str_fg<T: Bitmap>(buf: &mut T, x: i64, y: i64, color: u32, s: &str) 
 }
 
 pub fn draw_test_pattern<T: Bitmap>(buf: &mut T) {
-    let w = 128;
-    let left = buf.width() - w - 1;
+    let width = 128;
+    let left = buf.width() - width - 1;
     let colors = [0x000000, 0xff0000, 0x00ff00, 0x0000ff];
-    let h = 64;
-    for (i, c) in colors.iter().enumerate() {
-        let y = i as i64 * h;
-        fill_rect(buf, *c, left, y, h, h).expect("fill_rect failed");
-        fill_rect(buf, !*c, left + h, y, h, h).expect("fill_rect failed");
+    let height = 64;
+    for (index, color) in colors.iter().enumerate() {
+        let y = index as i64 * height;
+        fill_rect(buf, *color, left, y, height, height).expect("fill_rect failed");
+        fill_rect(buf, !*color, left + height, y, height, height)
+            .expect("fill_rect failed");
     }
-    let points = [(0, 0), (0, w), (w, 0), (w, w)];
+    let points = [(0, 0), (0, width), (width, 0), (width, width)];
     for (x0, y0) in points.iter() {
         for (x1, y1) in points.iter() {
             let _ = draw_line(buf, 0xffffff, left + *x0, *y0, left + *x1, *y1);
         }
     }
-    draw_str_fg(buf, left, h * colors.len() as i64, 0x00ff00, "0123456789");
-    draw_str_fg(buf, left, h * colors.len() as i64 + 16, 0x00ff00, "ABCDEF");
+    draw_str_fg(
+        buf,
+        left,
+        height * colors.len() as i64,
+        0x00ff00,
+        "0123456789",
+    );
+    draw_str_fg(
+        buf,
+        left,
+        height * colors.len() as i64 + 16,
+        0x00ff00,
+        "ABCDEF",
+    );
 }

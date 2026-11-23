@@ -10,9 +10,9 @@ use crate::x86::read_cr3;
 use core::fmt;
 
 /// The flag bits of an entry in words, e.g. `present, writable`.
-struct Flags(Entry);
+struct EntryDescription(Entry);
 
-impl fmt::Display for Flags {
+impl fmt::Display for EntryDescription {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let names = [
             (1, "present"),
@@ -43,13 +43,13 @@ fn print_step(step: &Step) {
     } else if step.entry.huge() {
         info!(
             "  {level}[{index:03}] {start:#018x}..{end:#018x} -> huge page ({})",
-            Flags(step.entry)
+            EntryDescription(step.entry)
         );
     } else {
         info!(
             "  {level}[{index:03}] {start:#018x}..{end:#018x} -> next table {:#x} ({})",
             step.entry.address(),
-            Flags(step.entry)
+            EntryDescription(step.entry)
         );
     }
 }

@@ -517,16 +517,16 @@ impl Registers {
 /// from an earlier lap.
 struct Ring<const N: usize> {
     entries: IoBox<[Trb; N]>,
-    index: usize,
-    cycle: bool,
+    next_index: usize,
+    cycle_state: bool,
 }
 
 impl<const N: usize> Ring<N> {
     fn new(tables: &mut PageTables) -> Self {
         Self {
             entries: IoBox::new(tables),
-            index: 0,
-            cycle: true,
+            next_index: 0,
+            cycle_state: true,
         }
     }
 
@@ -536,39 +536,39 @@ impl<const N: usize> Ring<N> {
 
     /// Where the next entry sits, in bytes from the ring's address.
     fn offset(&self) -> u64 {
-        (self.index * core::mem::size_of::<Trb>()) as u64
+        (self.next_index * core::mem::size_of::<Trb>()) as u64
     }
 
     /// Hands over one entry. The last slot is the link, so `N - 1` are usable and
     /// a ring that fills up needs a lap the driver cannot start yet.
     fn enqueue(&mut self, trb: Trb) -> Result<()> {
-        if self.index + 1 >= N {
+        if self.next_index + 1 >= N {
             return Err("the command ring is full");
         }
         self.entries
-            .write_slot(self.index, trb)
+            .write_slot(self.next_index, trb)
             .ok_or("the command ring is full")?;
-        self.index += 1;
+        self.next_index += 1;
         Ok(())
     }
 
     /// The next entry whose cycle bit says it belongs to this lap.
     fn dequeue(&mut self) -> Option<Trb> {
-        let entry = self.entries.read_slot(self.index)?;
-        if (entry.control & 1 != 0) != self.cycle {
+        let entry = self.entries.read_slot(self.next_index)?;
+        if (entry.control & 1 != 0) != self.cycle_state {
             return None;
         }
-        self.index += 1;
-        if self.index == N {
-            self.index = 0;
-            self.cycle = !self.cycle;
+        self.next_index += 1;
+        if self.next_index == N {
+            self.next_index = 0;
+            self.cycle_state = !self.cycle_state;
         }
         Some(entry)
     }
 
     /// Points the last slot back at the first, closing the ring.
     fn link_to_start(&mut self) {
-        let link = Trb::link(self.entries.address(), self.cycle);
+        let link = Trb::link(self.entries.address(), self.cycle_state);
         self.entries.write_slot(N - 1, link);
     }
 }
@@ -579,12 +579,12 @@ type Scratchpad = (IoBox<[u64; MAX_SCRATCHPAD]>, Vec<IoBox<[u8; 4096]>>);
 /// The root hub's ports and what they report.
 struct Ports {
     registers: Registers,
-    count: u32,
+    number_of_ports: u32,
 }
 
 impl Ports {
-    fn count(&self) -> u32 {
-        self.count
+    fn number_of_ports(&self) -> u32 {
+        self.number_of_ports
     }
 
     fn status(&self, port: u32) -> Portsc {
@@ -664,8 +664,8 @@ impl CommandChannel {
     }
 
     /// The cycle bit the next command must carry.
-    fn cycle(&self) -> bool {
-        self.ring.cycle
+    fn cycle_state(&self) -> bool {
+        self.ring.cycle_state
     }
 
     fn link_to_start(&mut self) {
@@ -683,20 +683,20 @@ impl CommandChannel {
 /// controller's answers.
 struct EventChannel {
     ring: Ring<RING_TRBS>,
-    erst: IoBox<[ErstEntry; 1]>,
+    event_ring_segment_table: IoBox<[ErstEntry; 1]>,
 }
 
 impl EventChannel {
     fn new(tables: &mut PageTables) -> Self {
         Self {
             ring: Ring::new(tables),
-            erst: IoBox::new(tables),
+            event_ring_segment_table: IoBox::new(tables),
         }
     }
 
     /// Points the controller at the segment table and the ring.
     fn program(&mut self, registers: &Registers) -> Result<()> {
-        self.erst
+        self.event_ring_segment_table
             .write_slot(
                 0,
                 ErstEntry {
@@ -707,7 +707,10 @@ impl EventChannel {
             )
             .ok_or("the segment table has no room")?;
         registers.write_rt(offset_of!(Interrupter, erstsz), 1);
-        registers.write_rt64(offset_of!(Interrupter, erstba), self.erst.address());
+        registers.write_rt64(
+            offset_of!(Interrupter, erstba),
+            self.event_ring_segment_table.address(),
+        );
         registers.write_rt64(offset_of!(Interrupter, erdp), self.ring.address());
         Ok(())
     }
@@ -880,7 +883,7 @@ pub struct HostController {
     /// Device context base address array (`DCBAA`): where each slot's context
     /// lives, and entry 0 the scratchpad buffers.
     dcbaa: IoBox<[u64; MAX_SLOTS]>,
-    _scratchpad: Option<Scratchpad>,
+    _scratchpad_buffers: Option<Scratchpad>,
     devices: Vec<Device>,
 }
 
@@ -927,10 +930,10 @@ impl HostController {
             events: EventChannel::new(tables),
             ports: Ports {
                 registers,
-                count: max_ports,
+                number_of_ports: max_ports,
             },
             dcbaa: IoBox::new(tables),
-            _scratchpad: None,
+            _scratchpad_buffers: None,
             devices: Vec::new(),
         };
         controller.program(max_slots, scratchpad, tables)?;
@@ -967,7 +970,7 @@ impl HostController {
             self.dcbaa
                 .write_slot(0, buffers.address())
                 .ok_or("the device context array is full")?;
-            self._scratchpad = Some((buffers, scratchpad_buffers));
+            self._scratchpad_buffers = Some((buffers, scratchpad_buffers));
         }
         self.registers
             .write_op64(offset_of!(Operational, dcbaap), self.dcbaa.address());
@@ -996,15 +999,15 @@ impl HostController {
     }
 
     /// Port numbers the controller reports, from 1.
-    pub fn ports(&self) -> u32 {
-        self.ports.count()
+    pub fn number_of_ports(&self) -> u32 {
+        self.ports.number_of_ports()
     }
 
     /// Sends a no-op command and waits for its completion event: if that arrives,
     /// the doorbell, the command ring, the event ring and the completion path all
     /// work.
     fn check_with_no_op(&mut self) -> Result<()> {
-        let trb = Trb::no_op_command(self.commands.cycle());
+        let trb = Trb::no_op_command(self.commands.cycle_state());
         self.commands.send(&self.registers, trb)?;
         let event = self.events.wait_for_completion(&self.registers)?;
         if completion_code(&event) != CompletionCode::Success {
@@ -1017,7 +1020,7 @@ impl HostController {
     /// Finds connected devices, resets their ports, and lets the controller pick
     /// a slot for each.
     pub fn enumerate_ports(&mut self, tables: &mut PageTables) -> Result<()> {
-        for port in 1..=self.ports.count() {
+        for port in 1..=self.ports.number_of_ports() {
             let status = self.ports.status(port);
             if status.connected() == 0 {
                 continue;
@@ -1050,7 +1053,7 @@ impl HostController {
 
     /// Asks the controller for a slot, which is where a device's contexts live.
     fn enable_slot(&mut self, slot_type: u32) -> Result<u32> {
-        let trb = Trb::enable_slot(self.commands.cycle(), slot_type);
+        let trb = Trb::enable_slot(self.commands.cycle_state(), slot_type);
         self.commands.send(&self.registers, trb)?;
         let event = self.events.wait_for_completion(&self.registers)?;
         if completion_code(&event) != CompletionCode::Success {
@@ -1080,8 +1083,11 @@ impl HostController {
             .write_slot(slot as usize, device_context.address())
             .ok_or("the device context array is full")?;
 
-        let trb =
-            Trb::address_device(input_context.address(), slot, self.commands.cycle());
+        let trb = Trb::address_device(
+            input_context.address(),
+            slot,
+            self.commands.cycle_state(),
+        );
         self.commands.send(&self.registers, trb)?;
         let event = self.events.wait_for_completion(&self.registers)?;
         if completion_code(&event) != CompletionCode::Success {

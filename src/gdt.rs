@@ -81,16 +81,16 @@ const _: () = assert!(size_of::<Tss>() == 104);
 
 #[repr(C)]
 struct GdtBacking {
-    null: u64,
-    kernel_code: u64,
-    kernel_data: u64,
-    tss_low: u64,
-    tss_high: u64,
+    null_descriptor: u64,
+    kernel_code_descriptor: u64,
+    kernel_data_descriptor: u64,
+    tss_descriptor_low: u64,
+    tss_descriptor_high: u64,
 }
 const _: () = assert!(size_of::<GdtBacking>() == 5 * 8);
 
 /// Low half of a 64-bit TSS descriptor: present, type 0x9 (available TSS).
-fn tss_low(base: u64, limit: u32) -> u64 {
+fn tss_descriptor_low(base: u64, limit: u32) -> u64 {
     let mut descriptor = SegmentDescriptor::new(0);
     descriptor.set_limit_low(u64::from(limit) & 0xffff);
     descriptor.set_limit_high(u64::from(limit >> 16) & 0xf);
@@ -137,11 +137,11 @@ impl Gdt {
         let tss_base = &*tss as *const Tss as u64;
 
         let entries = Box::pin(GdtBacking {
-            null: 0,
-            kernel_code: kernel_code().raw(),
-            kernel_data: kernel_data().raw(),
-            tss_low: tss_low(tss_base, size_of::<Tss>() as u32 - 1),
-            tss_high: tss_base >> 32,
+            null_descriptor: 0,
+            kernel_code_descriptor: kernel_code().raw(),
+            kernel_data_descriptor: kernel_data().raw(),
+            tss_descriptor_low: tss_descriptor_low(tss_base, size_of::<Tss>() as u32 - 1),
+            tss_descriptor_high: tss_base >> 32,
         });
 
         Self {

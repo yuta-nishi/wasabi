@@ -25,7 +25,7 @@ const PIT_COMMAND: u16 = 0x43;
 /// Timer interrupts since [`start`].
 pub static TICKS: AtomicU64 = AtomicU64::new(0);
 
-fn wait() {
+fn pic_settle() {
     // The PIC needs a moment between the initialization commands; the classic
     // remedy is an I/O write to an unused port.
     write_io_port_u8(0x80, 0);
@@ -36,19 +36,19 @@ pub fn remap_pic() {
     // ICW1: start initialization, ICW4 will follow.
     write_io_port_u8(PIC1_COMMAND, 0x11);
     write_io_port_u8(PIC2_COMMAND, 0x11);
-    wait();
+    pic_settle();
     // ICW2: vector offsets.
     write_io_port_u8(PIC1_DATA, PIC1_OFFSET);
     write_io_port_u8(PIC2_DATA, PIC2_OFFSET);
-    wait();
+    pic_settle();
     // ICW3: the slave hangs off IRQ2 of the master.
     write_io_port_u8(PIC1_DATA, 0x04);
     write_io_port_u8(PIC2_DATA, 0x02);
-    wait();
+    pic_settle();
     // ICW4: 8086 mode.
     write_io_port_u8(PIC1_DATA, 0x01);
     write_io_port_u8(PIC2_DATA, 0x01);
-    wait();
+    pic_settle();
     // Only IRQ0 (the timer) is allowed through.
     write_io_port_u8(PIC1_DATA, UNMASK_ONLY_IRQ0);
     write_io_port_u8(PIC2_DATA, MASK_ALL);

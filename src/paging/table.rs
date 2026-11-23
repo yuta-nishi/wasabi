@@ -177,7 +177,7 @@ pub fn translate_in(root: &[Entry], address: u64) -> Translation {
             let physical = entry.address() + (address & PAGE_OFFSET_MASK);
             return Translation::Page(steps, physical);
         }
-        table = next(entry);
+        table = next_table(entry);
     }
     unreachable!("the walk always ends at the PT level");
 }
@@ -254,7 +254,7 @@ impl PageTables {
             "physical address alignment"
         );
         let (table, index) = self
-            .pd_and_index(virtual_address, true)
+            .page_directory_and_index(virtual_address, true)
             .expect("PD allocated");
         // SAFETY: `table` points at the PD `pd_and_index` just returned.
         unsafe {
@@ -300,7 +300,7 @@ impl PageTables {
         assert_eq!(virtual_address % PAGE_SIZE, 0, "virtual address alignment");
 
         let (table, index) = self
-            .pt_and_index(virtual_address, true)
+            .page_table_and_index(virtual_address, true)
             .expect("walking with allocation always reaches a PT");
         // SAFETY: `table` points at the PT `pt_and_index` just returned.
         unsafe { (*table).entries_mut()[index] = Entry::from_raw(flags.raw()) };
@@ -310,7 +310,8 @@ impl PageTables {
     pub fn unmap_page(&mut self, virtual_address: u64) {
         assert_eq!(virtual_address % PAGE_SIZE, 0, "virtual address alignment");
 
-        let Some((table, index)) = self.pt_and_index(virtual_address, false) else {
+        let Some((table, index)) = self.page_table_and_index(virtual_address, false)
+        else {
             return;
         };
         // SAFETY: `table` points at the PT that holds this page.
@@ -318,7 +319,7 @@ impl PageTables {
     }
 
     /// Walks to the PD that holds `address`, for a 2 MiB page.
-    fn pd_and_index(
+    fn page_directory_and_index(
         &mut self,
         address: u64,
         allocate: bool,
@@ -346,7 +347,7 @@ impl PageTables {
     ///
     /// Every translation in the 2 MiB range changes, so all of them are dropped.
     fn split_huge_page(&mut self, address: u64) -> bool {
-        let Some((table, index)) = self.pd_and_index(address, false) else {
+        let Some((table, index)) = self.page_directory_and_index(address, false) else {
             return false;
         };
         // SAFETY: `table` points at the PD that holds this entry.
@@ -379,7 +380,7 @@ impl PageTables {
 
     /// Walks down to the PT that holds `address`, allocating missing levels
     /// when `allocate` is set, and returns that table with the entry index.
-    fn pt_and_index(
+    fn page_table_and_index(
         &mut self,
         address: u64,
         allocate: bool,
@@ -422,7 +423,7 @@ pub(super) fn root() -> &'static [Entry] {
     unsafe { core::slice::from_raw_parts(address, ENTRIES) }
 }
 
-fn next(entry: Entry) -> &'static [Entry] {
+fn next_table(entry: Entry) -> &'static [Entry] {
     let address = entry.address() as *const Entry;
     // SAFETY: a present entry without PS points at the next level.
     unsafe { core::slice::from_raw_parts(address, ENTRIES) }
