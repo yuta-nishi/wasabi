@@ -1,5 +1,3 @@
-//! Named fields over a register word.
-
 /// Names the bit fields of a 32-bit register word.
 ///
 /// Each field becomes a getter named after the field, so call sites never carry
