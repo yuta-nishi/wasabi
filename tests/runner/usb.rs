@@ -3,6 +3,8 @@ use wasabi::usb::descriptor::DeviceDescriptor;
 use wasabi::usb::descriptor::EndpointDescriptor;
 use wasabi::usb::descriptor::InterfaceDescriptor;
 use wasabi::usb::descriptor::descriptors;
+use wasabi::usb::hid::key_for;
+use wasabi::usb::hid::keys;
 
 /// The QEMU USB keyboard's device descriptor, as the controller returned it.
 const KEYBOARD_DEVICE: &[u8] = &[
@@ -74,4 +76,26 @@ pub fn a_broken_length_ends_the_walk() {
     // The first descriptor claims thirteen bytes but only nine follow.
     let broken = &[0x0d, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
     assert_eq!(descriptors(broken).count(), 0);
+}
+
+pub fn usage_codes_become_characters() {
+    assert_eq!(key_for(0x04, false), Some('a'));
+    assert_eq!(key_for(0x04, true), Some('A'));
+    assert_eq!(key_for(0x1e, false), Some('1'));
+    assert_eq!(key_for(0x1e, true), Some('!'));
+    assert_eq!(key_for(0x2c, false), Some(' '));
+    assert_eq!(key_for(0x28, false), Some('\n'));
+    assert_eq!(key_for(0x00, false), None);
+    assert_eq!(key_for(0x68, false), None);
+}
+
+pub fn a_report_carries_the_keys_that_are_held() {
+    // Shift held, then the letter b, then nothing else.
+    let report = [0x02, 0x00, 0x05, 0x00, 0x00, 0x00, 0x00, 0x00];
+    let decoded = keys(&report);
+    assert_eq!(decoded[0], Some('B'));
+    assert!(decoded[1..].iter().all(Option::is_none));
+
+    // A short report has nothing to say.
+    assert!(keys(&[0x00, 0x00]).iter().all(Option::is_none));
 }

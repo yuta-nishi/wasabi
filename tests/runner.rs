@@ -166,6 +166,14 @@ extern "efiapi" fn efi_main(
             "a_broken_length_ends_the_walk",
             usb::a_broken_length_ends_the_walk,
         ),
+        (
+            "usage_codes_become_characters",
+            usb::usage_codes_become_characters,
+        ),
+        (
+            "a_report_carries_the_keys_that_are_held",
+            usb::a_report_carries_the_keys_that_are_held,
+        ),
         ("trb_types_have_names", xhci::trb_types_have_names),
         (
             "context_words_use_the_specification_positions",

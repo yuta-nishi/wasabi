@@ -16,6 +16,7 @@ use crate::usb::descriptor::DeviceDescriptor;
 use crate::usb::descriptor::EndpointDescriptor;
 use crate::usb::descriptor::InterfaceDescriptor;
 use crate::usb::descriptor::descriptors;
+use crate::usb::hid;
 use alloc::vec::Vec;
 use core::mem::offset_of;
 use core::mem::size_of;
@@ -256,6 +257,7 @@ unsafe impl Zeroable for Trb {}
 /// What a TRB asks for or reports (xHCI specification, table 6-91).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum TrbType {
+    Normal,
     SetupStage,
     DataStage,
     StatusStage,
@@ -263,6 +265,7 @@ pub enum TrbType {
     EnableSlot,
     DisableSlot,
     AddressDevice,
+    ConfigureEndpoint,
     NoOpCommand,
     TransferEvent,
     CommandCompletion,
@@ -273,6 +276,7 @@ pub enum TrbType {
 impl TrbType {
     fn raw(self) -> u32 {
         match self {
+            Self::Normal => 1,
             Self::SetupStage => 2,
             Self::DataStage => 3,
             Self::StatusStage => 4,
@@ -280,6 +284,7 @@ impl TrbType {
             Self::EnableSlot => 9,
             Self::DisableSlot => 10,
             Self::AddressDevice => 11,
+            Self::ConfigureEndpoint => 12,
             Self::NoOpCommand => 23,
             Self::TransferEvent => 32,
             Self::CommandCompletion => 33,
@@ -290,6 +295,7 @@ impl TrbType {
 
     pub fn from_raw(raw: u32) -> Self {
         match raw {
+            1 => Self::Normal,
             2 => Self::SetupStage,
             3 => Self::DataStage,
             4 => Self::StatusStage,
@@ -297,6 +303,7 @@ impl TrbType {
             9 => Self::EnableSlot,
             10 => Self::DisableSlot,
             11 => Self::AddressDevice,
+            12 => Self::ConfigureEndpoint,
             23 => Self::NoOpCommand,
             32 => Self::TransferEvent,
             33 => Self::CommandCompletion,
@@ -368,6 +375,25 @@ impl Trb {
         Self {
             control: (TrbType::EnableSlot.raw() << 10) | (slot_type << 16),
             ..Self::default()
+        }
+    }
+
+    /// `Normal` (TRB type 1): moves one buffer's worth of data on an endpoint.
+    fn normal(buffer: u64, length: u32) -> Self {
+        Self {
+            parameter: buffer,
+            status: length,
+            control: (TrbType::Normal.raw() << 10) | (1 << 5),
+        }
+    }
+
+    /// `Configure Endpoint` (TRB type 12): adds the endpoints an input context
+    /// describes to a device that already has an address.
+    fn configure_endpoint(input_context: u64, slot: u32) -> Self {
+        Self {
+            parameter: input_context,
+            status: 0,
+            control: (TrbType::ConfigureEndpoint.raw() << 10) | (slot << 24),
         }
     }
 
@@ -730,14 +756,22 @@ impl Ports {
 struct Device {
     slot: u32,
     port: u32,
-    /// The endpoint 0 ring: control transfers go through it. Held until the
-    /// transfers of the next chapter use it.
-    #[allow(dead_code)]
+    /// The endpoint 0 ring: control transfers go through it.
     endpoint0_ring: Ring<RING_TRBS>,
     /// Where the controller keeps the device's contexts.
     _device_context: IoBox<[u32; CONTEXT_WORDS]>,
     /// The input context the device was addressed with.
     _input_context: IoBox<[u32; CONTEXT_WORDS]>,
+    /// The interrupt endpoint, once the configuration is set.
+    interrupt: Option<InterruptEndpoint>,
+}
+
+/// An interrupt IN endpoint: the ring the reports arrive on, and the buffer one
+/// report is written into.
+struct InterruptEndpoint {
+    endpoint_id: u32,
+    ring: Ring<RING_TRBS>,
+    buffer: IoBox<[u8; 8]>,
 }
 
 /// The command ring and the doorbell that says it moved.
@@ -865,6 +899,13 @@ bitfield! {
 }
 
 bitfield! {
+    /// Endpoint context word 0: how often an interrupt endpoint is polled.
+    EndpointContext0: u32 {
+        interval: 23, 16 -> set_interval,
+    }
+}
+
+bitfield! {
     /// Endpoint context word 1: what the endpoint is and how it behaves.
     EndpointContext1: u32 {
         cerr: 2, 1 -> set_cerr,
@@ -896,10 +937,17 @@ impl InputContext {
         self.memory.address()
     }
 
-    /// Adds the slot context (A0) and endpoint 0 (A1) to this command.
-    fn add_slot_and_endpoint0(&mut self) -> Result<()> {
+    /// The word where endpoint `dci`'s context starts.
+    fn endpoint_context_words(dci: usize) -> usize {
+        // One context for the input control and one for the slot come first.
+        8 + 8 * dci
+    }
+
+    /// Adds `dci` (and the slot context) to this command.
+    fn add_context(&mut self, dci: usize) -> Result<()> {
+        let flags = 0b1 | (1 << dci);
         self.memory
-            .write_slot(1, 0b11)
+            .write_slot(1, flags)
             .ok_or("the input context is too small")?;
         Ok(())
     }
@@ -932,15 +980,51 @@ impl InputContext {
 
     /// Endpoint 0: control, three retries, its packet size and its ring.
     fn set_endpoint0(&mut self, max_packet: u16, ring: u64) -> Result<()> {
-        let ep0 = 2 * (CONTEXT_SIZE / 4);
+        self.set_endpoint(1, 4, max_packet, 0, ring)
+    }
+
+    /// The index of the last valid endpoint context, which sizes the slot.
+    fn set_context_entries(&mut self, dci: usize) -> Result<()> {
+        let slot = CONTEXT_SIZE / 4;
+        let mut word0 = SlotContext0::new(
+            self.memory
+                .read_slot(slot)
+                .ok_or("the input context is too small")?,
+        );
+        word0.set_context_entries(dci as u32);
+        self.memory
+            .write_slot(slot, word0.raw())
+            .ok_or("the input context is too small")?;
+        Ok(())
+    }
+
+    /// An endpoint with `endpoint_type`, its packet size, its polling interval
+    /// and the ring it reads.
+    fn set_endpoint(
+        &mut self,
+        dci: usize,
+        endpoint_type: u32,
+        max_packet: u16,
+        interval: u8,
+        ring: u64,
+    ) -> Result<()> {
+        let ep0 = Self::endpoint_context_words(dci);
+        let mut word0 = EndpointContext0::new(
+            self.memory
+                .read_slot(ep0)
+                .ok_or("the input context is too small")?,
+        );
+        word0.set_interval(u32::from(interval));
+        self.memory
+            .write_slot(ep0, word0.raw())
+            .ok_or("the input context is too small")?;
         let mut word1 = EndpointContext1::new(
             self.memory
                 .read_slot(ep0 + 1)
                 .ok_or("the input context is too small")?,
         );
         word1.set_max_packet(u32::from(max_packet));
-        // Endpoint type 4 is a control endpoint.
-        word1.set_ep_type(4);
+        word1.set_ep_type(endpoint_type);
         word1.set_cerr(3);
         self.memory
             .write_slot(ep0 + 1, word1.raw())
@@ -1147,7 +1231,13 @@ impl HostController {
             descriptor.class,
             descriptor.number_of_configurations
         );
-        self.read_configuration(tables, slot).await
+        let (configuration_value, interrupt_endpoint) =
+            self.read_configuration(tables, slot).await?;
+        self.set_configuration(slot, configuration_value).await?;
+        if let Some(endpoint) = interrupt_endpoint {
+            self.configure_endpoint(tables, slot, endpoint).await?;
+        }
+        Ok(())
     }
 
     /// Keeps reading events and handles any port that changed while the OS runs.
@@ -1161,6 +1251,12 @@ impl HostController {
                     TrbType::PortStatusChange => {
                         self.handle_port_change(tables, event.parameter as u32 >> 24)
                             .await?;
+                    }
+                    TrbType::TransferEvent => {
+                        let control = TrbControl::new(event.control);
+                        if control.endpoint() != 1 {
+                            self.handle_report(control.slot(), control.endpoint())?;
+                        }
                     }
                     other => info!("xhci: event {other:?} with nothing waiting for it"),
                 }
@@ -1229,7 +1325,7 @@ impl HostController {
         &mut self,
         tables: &mut PageTables,
         slot: u32,
-    ) -> Result<()> {
+    ) -> Result<(u8, Option<EndpointDescriptor>)> {
         let buffer = IoBox::<[u8; 512]>::new(tables);
         // The header says how long the whole configuration is.
         let header_length = ConfigurationDescriptor::LENGTH;
@@ -1259,6 +1355,7 @@ impl HostController {
             configuration.total_length
         );
 
+        let mut interrupt_endpoint = None;
         for raw in descriptors(bytes) {
             match raw.kind {
                 descriptor::INTERFACE => {
@@ -1285,12 +1382,22 @@ impl HostController {
                             endpoint.max_packet_size,
                             endpoint.interval
                         );
+                        if endpoint.transfer_type() == 3 && endpoint.direction_in() {
+                            interrupt_endpoint = Some(endpoint);
+                        }
                     }
                 }
                 _ => {}
             }
         }
-        Ok(())
+        Ok((configuration.configuration_value, interrupt_endpoint))
+    }
+
+    fn device_position(&self, slot: u32) -> Result<usize> {
+        self.devices
+            .iter()
+            .position(|device| device.slot == slot)
+            .ok_or("no device has that slot")
     }
 
     /// Sends a control-IN transfer on endpoint 0 and waits for it to finish.
@@ -1301,32 +1408,31 @@ impl HostController {
         buffer: u64,
         length: u32,
     ) -> Result<()> {
-        let position = self
-            .devices
-            .iter()
-            .position(|device| device.slot == slot)
-            .ok_or("no device has that slot")?;
+        let position = self.device_position(slot)?;
         {
             let ring = &mut self.devices[position].endpoint0_ring;
             ring.enqueue(Trb::setup_stage(request))?;
             ring.enqueue(Trb::data_stage(buffer, length, true))?;
             ring.enqueue(Trb::status_stage(false))?;
         }
-        // Endpoint 0 answers on doorbell `slot`, target DCI 1.
         self.registers.ring_endpoint_doorbell(slot, 1);
+        self.wait_transfer(slot, 1).await
+    }
 
+    /// Waits until the controller reports a transfer on `endpoint` of `slot`.
+    async fn wait_transfer(&mut self, slot: u32, endpoint: u32) -> Result<()> {
         let deadline = timer::nanoseconds() + TIMEOUT_MS * 1_000_000;
         loop {
             while let Some(event) = self.events.take(&self.registers) {
                 match trb_type(&event) {
                     TrbType::TransferEvent => {
                         let control = TrbControl::new(event.control);
-                        if control.slot() == slot && control.endpoint() == 1 {
+                        if control.slot() == slot && control.endpoint() == endpoint {
                             let status = TransferEventStatus::new(event.status);
                             let code = CompletionCode::from_raw(status.completion_code());
                             if code != CompletionCode::Success {
                                 error!("xhci: transfer failed with {code:?}");
-                                return Err("the control transfer failed");
+                                return Err("the transfer failed");
                             }
                             return Ok(());
                         }
@@ -1338,10 +1444,114 @@ impl HostController {
                 }
             }
             if timer::nanoseconds() >= deadline {
-                return Err("the control transfer timed out");
+                return Err("the transfer timed out");
             }
             timer::sleep(core::time::Duration::from_millis(1)).await;
         }
+    }
+
+    /// Selects a configuration (USB 2.0, 9.4.7): the request carries no data.
+    async fn set_configuration(&mut self, slot: u32, value: u8) -> Result<()> {
+        let request = 0x09u64 << 8 | u64::from(value) << 16;
+        let position = self.device_position(slot)?;
+        {
+            let ring = &mut self.devices[position].endpoint0_ring;
+            ring.enqueue(Trb::setup_stage(request))?;
+            ring.enqueue(Trb::status_stage(true))?;
+        }
+        self.registers.ring_endpoint_doorbell(slot, 1);
+        self.wait_transfer(slot, 1).await
+    }
+
+    /// Adds the interrupt endpoint of the selected configuration.
+    async fn configure_endpoint(
+        &mut self,
+        tables: &mut PageTables,
+        slot: u32,
+        endpoint: EndpointDescriptor,
+    ) -> Result<()> {
+        let position = self.device_position(slot)?;
+        let port = self.devices[position].port;
+        let port_speed = self.ports.speed(port)?;
+        // Endpoint `n` IN is DCI 2n+1.
+        let endpoint_id =
+            u32::from(endpoint.number()) * 2 + u32::from(endpoint.direction_in());
+        let ring = Ring::<RING_TRBS>::new(tables);
+        let buffer = IoBox::<[u8; 8]>::new(tables);
+
+        let mut input_context = InputContext::new(tables);
+        input_context.add_context(endpoint_id as usize)?;
+        input_context.set_slot(port_speed, port)?;
+        input_context.set_context_entries(endpoint_id as usize)?;
+        // Type 7 is an interrupt IN endpoint (xHCI 6.2.3).
+        input_context.set_endpoint(
+            endpoint_id as usize,
+            7,
+            endpoint.max_packet_size,
+            endpoint.interval,
+            ring.address(),
+        )?;
+
+        let trb = Trb::configure_endpoint(input_context.address(), slot);
+        self.commands.send(&self.registers, trb)?;
+        let event = self.events.wait_for_completion(&self.registers).await?;
+        if completion_code(&event) != CompletionCode::Success {
+            return Err("the configure endpoint command failed");
+        }
+        self.devices[position].interrupt = Some(InterruptEndpoint {
+            endpoint_id,
+            ring,
+            buffer,
+        });
+        self.arm_interrupt(position);
+        info!(
+            "xhci: slot {slot} endpoint {:#04x} configured, {} byte reports",
+            endpoint.address, endpoint.max_packet_size
+        );
+        Ok(())
+    }
+
+    /// Queues one report buffer on the interrupt endpoint.
+    fn arm_interrupt(&mut self, position: usize) {
+        let device = &mut self.devices[position];
+        let Some(interrupt) = device.interrupt.as_mut() else {
+            return;
+        };
+        if interrupt
+            .ring
+            .enqueue(Trb::normal(interrupt.buffer.address(), 8))
+            .is_err()
+        {
+            return;
+        }
+        let slot = device.slot;
+        let endpoint = interrupt.endpoint_id;
+        self.registers.ring_endpoint_doorbell(slot, endpoint);
+    }
+
+    /// Reads a report the interrupt endpoint delivered and queues the next one.
+    fn handle_report(&mut self, slot: u32, endpoint_id: u32) -> Result<()> {
+        let Ok(position) = self.device_position(slot) else {
+            return Ok(());
+        };
+        let keys = {
+            let device = &self.devices[position];
+            let Some(interrupt) = device.interrupt.as_ref() else {
+                return Ok(());
+            };
+            if interrupt.endpoint_id != endpoint_id {
+                return Ok(());
+            }
+            // SAFETY: the buffer is page aligned and the controller wrote the
+            // eight bytes of a boot-protocol report into it.
+            let report = unsafe { Self::descriptor_bytes(interrupt.buffer.address(), 8) };
+            hid::keys(report)
+        };
+        for key in keys.iter().flatten() {
+            info!("xhci: slot {slot} key {key:?}");
+        }
+        self.arm_interrupt(position);
+        Ok(())
     }
 
     /// Frees the slot a device was using.
@@ -1380,7 +1590,7 @@ impl HostController {
         let mut input_context = InputContext::new(tables);
         let device_context = IoBox::<[u32; CONTEXT_WORDS]>::new(tables);
 
-        input_context.add_slot_and_endpoint0()?;
+        input_context.add_context(1)?;
         input_context.set_slot(speed, port)?;
         input_context.set_endpoint0(max_packet, endpoint0.address())?;
         self.dcbaa
@@ -1406,6 +1616,7 @@ impl HostController {
             endpoint0_ring: endpoint0,
             _device_context: device_context,
             _input_context: input_context.memory,
+            interrupt: None,
         });
         Ok(())
     }
