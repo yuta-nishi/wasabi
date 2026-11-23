@@ -1,4 +1,4 @@
-use crate::executor::Executor;
+use crate::executor;
 use crate::info;
 use crate::input::Line;
 use crate::println;
@@ -8,7 +8,7 @@ use core::time::Duration;
 
 /// Spawns the demo tasks and hands the CPU to the executor forever.
 pub fn run() -> ! {
-    EXECUTOR.spawn(async {
+    executor::spawn(async {
         for step in 0..3 {
             info!(
                 "task a: step {step} at {} ms",
@@ -18,7 +18,7 @@ pub fn run() -> ! {
         }
         info!("task a: done");
     });
-    EXECUTOR.spawn(async {
+    executor::spawn(async {
         for step in 0..3 {
             info!(
                 "task b: step {step} at {} ms",
@@ -29,7 +29,7 @@ pub fn run() -> ! {
         info!("task b: done");
     });
     spawn_serial_console();
-    EXECUTOR.run()
+    executor::run()
 }
 
 /// Polls the serial port and logs each line once Enter arrives.
@@ -38,7 +38,7 @@ pub fn run() -> ! {
 /// byte is waiting, so this task polls with `sleep` and the other tasks keep
 /// their turns.
 fn spawn_serial_console() {
-    EXECUTOR.spawn(async {
+    executor::spawn(async {
         let mut serial = Serial;
         let mut line = Line::new();
         // QEMU's window and the terminal both take keys: only the terminal's
@@ -59,6 +59,3 @@ fn spawn_serial_console() {
         }
     });
 }
-
-/// The executor the OS runs its tasks on.
-static EXECUTOR: Executor = Executor::new();
