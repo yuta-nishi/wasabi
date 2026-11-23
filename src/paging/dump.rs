@@ -1,5 +1,5 @@
-use super::table::ADDRESS_MASK;
 use super::table::Entry;
+use super::table::EntryFlags;
 use super::table::Level;
 use super::table::Step;
 use super::table::Translation;
@@ -58,7 +58,7 @@ fn print_step(step: &Step) {
 pub fn dump_root() {
     info!(
         "paging: cr3 = {:#018x} (the active PML4)",
-        read_cr3() & ADDRESS_MASK
+        EntryFlags::new(read_cr3()).physical()
     );
     let shift = Level::Pml4.shift();
     for (index, entry) in root().iter().enumerate() {

@@ -1,3 +1,4 @@
+use crate::bitfield;
 use crate::x86::DescriptorTablePointer;
 use alloc::boxed::Box;
 use core::arch::asm;
@@ -11,10 +12,53 @@ const KERNEL_DATA_SELECTOR: u16 = 0x10;
 /// Selector of the TSS (GDT entries 3 and 4: a 16-byte system descriptor).
 const TSS_SELECTOR: u16 = 0x18;
 
-/// Present, DPL 0, 64-bit code segment, 4 GiB limit.
-const KERNEL_CODE: u64 = 0x00af_9a00_0000_ffff;
-/// Present, DPL 0, data segment.
-const KERNEL_DATA: u64 = 0x00cf_9200_0000_ffff;
+bitfield! {
+    /// A code, data or system segment descriptor (Intel SDM 3.4.5).
+    SegmentDescriptor: u64 {
+        limit_low: 15, 0 -> set_limit_low,
+        base_low: 31, 16 -> set_base_low,
+        base_middle: 39, 32 -> set_base_middle,
+        kind: 43, 40 -> set_kind,
+        system: 44, 44 -> set_system,
+        dpl: 46, 45 -> set_dpl,
+        present: 47, 47 -> set_present,
+        limit_high: 51, 48 -> set_limit_high,
+        available: 52, 52 -> set_available,
+        long: 53, 53 -> set_long,
+        wide: 54, 54 -> set_wide,
+        granularity: 55, 55 -> set_granularity,
+        base_high: 63, 56 -> set_base_high,
+    }
+}
+
+/// A segment covering all of memory, in 4 KiB units.
+const LIMIT_4_GIB: u32 = 0x000f_ffff;
+
+/// A 64-bit code segment: readable, present, ring 0.
+fn kernel_code() -> SegmentDescriptor {
+    let mut descriptor = SegmentDescriptor::new(0);
+    descriptor.set_limit_low(LIMIT_4_GIB as u64 & 0xffff);
+    descriptor.set_limit_high(u64::from(LIMIT_4_GIB >> 16) & 0xf);
+    descriptor.set_kind(0b1010);
+    descriptor.set_system(1);
+    descriptor.set_present(1);
+    descriptor.set_long(1);
+    descriptor.set_granularity(1);
+    descriptor
+}
+
+/// A data segment: writable, present, ring 0.
+fn kernel_data() -> SegmentDescriptor {
+    let mut descriptor = SegmentDescriptor::new(0);
+    descriptor.set_limit_low(LIMIT_4_GIB as u64 & 0xffff);
+    descriptor.set_limit_high(u64::from(LIMIT_4_GIB >> 16) & 0xf);
+    descriptor.set_kind(0b0010);
+    descriptor.set_system(1);
+    descriptor.set_present(1);
+    descriptor.set_wide(1);
+    descriptor.set_granularity(1);
+    descriptor
+}
 
 /// Stack the CPU switches to for exceptions (and later for interrupts).
 const INTERRUPT_STACK_SIZE: usize = 16 * 1024;
@@ -46,13 +90,16 @@ struct GdtBacking {
 const _: () = assert!(size_of::<GdtBacking>() == 5 * 8);
 
 /// Low half of a 64-bit TSS descriptor: present, type 0x9 (available TSS).
-const fn tss_low(base: u64, limit: u32) -> u64 {
-    let limit = limit as u64;
-    (limit & 0xffff)
-        | ((base & 0x00ff_ffff) << 16)
-        | (0b1000_1001 << 40)
-        | (((limit >> 16) & 0xf) << 48)
-        | (((base >> 24) & 0xff) << 56)
+fn tss_low(base: u64, limit: u32) -> u64 {
+    let mut descriptor = SegmentDescriptor::new(0);
+    descriptor.set_limit_low(u64::from(limit) & 0xffff);
+    descriptor.set_limit_high(u64::from(limit >> 16) & 0xf);
+    descriptor.set_base_low(base & 0xffff);
+    descriptor.set_base_middle((base >> 16) & 0xff);
+    descriptor.set_kind(0b1001);
+    descriptor.set_present(1);
+    descriptor.set_base_high((base >> 24) & 0xff);
+    descriptor.raw()
 }
 
 /// Owns the GDT, the TSS and the interrupt stack they point at.
@@ -91,8 +138,8 @@ impl Gdt {
 
         let entries = Box::pin(GdtBacking {
             null: 0,
-            kernel_code: KERNEL_CODE,
-            kernel_data: KERNEL_DATA,
+            kernel_code: kernel_code().raw(),
+            kernel_data: kernel_data().raw(),
             tss_low: tss_low(tss_base, size_of::<Tss>() as u32 - 1),
             tss_high: tss_base >> 32,
         });

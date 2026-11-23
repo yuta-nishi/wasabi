@@ -1,3 +1,4 @@
+use crate::bitfield;
 use crate::result::Result;
 use crate::x86::read_io_port_u8;
 use crate::x86::write_io_port_u8;
@@ -12,18 +13,67 @@ const COM1_FIFO_CONTROL: u16 = COM1 + 2;
 const COM1_LINE_CONTROL: u16 = COM1 + 3;
 /// Modem control register.
 const COM1_MODEM_CONTROL: u16 = COM1 + 4;
-/// The line status register; bit 5 is set while the transmitter can take a byte.
+/// The line status register.
 const COM1_LINE_STATUS: u16 = COM1 + 5;
-const TRANSMITTER_EMPTY: u8 = 1 << 5;
-/// Bit 0 of the line status register: a received byte is waiting in `COM1`.
-const DATA_READY: u8 = 1 << 0;
 
 /// 115200 baud on a 1.8432 MHz clock: the divisor is 16.
 const BAUD_DIVISOR: u16 = 1;
+
+bitfield! {
+    /// The line control register: how bits are framed on the wire.
+    LineControl: u8 {
+        word_length: 1, 0 -> set_word_length,
+        stop_bits: 2, 2 -> set_stop_bits,
+        parity: 5, 3 -> set_parity,
+        divisor_latch: 7, 7 -> set_divisor_latch,
+    }
+}
+
+bitfield! {
+    /// The FIFO control register: whether the 16-byte buffers are used.
+    FifoControl: u8 {
+        enable: 0, 0 -> set_enable,
+        clear_received: 1, 1 -> set_clear_received,
+        clear_transmitted: 2, 2 -> set_clear_transmitted,
+        trigger: 7, 6 -> set_trigger,
+    }
+}
+
+bitfield! {
+    /// The modem control register: the lines the port drives.
+    ModemControl: u8 {
+        dtr: 0, 0 -> set_dtr,
+        rts: 1, 1 -> set_rts,
+        out1: 2, 2 -> set_out1,
+        out2: 3, 3 -> set_out2,
+        loopback: 4, 4 -> set_loopback,
+    }
+}
+
+bitfield! {
+    /// The line status register: what the port is doing.
+    LineStatus: u8 {
+        data_ready: 0, 0,
+        overrun: 1, 1,
+        transmitter_empty: 5, 5,
+    }
+}
+
 /// DTR and RTS asserted, OUT2 on: the line is ready and the IRQ line is wired.
-const MODEM_READY: u8 = 0x0b;
-/// [`MODEM_READY`] plus loopback: transmitted bytes come straight back.
-const MODEM_LOOPBACK: u8 = 0x1e;
+fn modem_ready() -> ModemControl {
+    let mut control = ModemControl::new(0);
+    control.set_dtr(1);
+    control.set_rts(1);
+    control.set_out2(1);
+    control
+}
+
+/// [`modem_ready`] plus loopback: transmitted bytes come straight back.
+fn modem_loopback() -> ModemControl {
+    let mut control = modem_ready();
+    control.set_loopback(1);
+    control
+}
 
 /// A writer for COM1. It carries no state (the port itself is the writer), so a
 /// fresh value can be used anywhere without sharing or locking.
@@ -38,15 +88,27 @@ impl Serial {
     /// input is polled from the executor, not delivered by interrupt.
     pub fn init(&mut self) {
         write_io_port_u8(COM1_INTERRUPT_ENABLE, 0x00);
-        // DLAB on: the two low registers now carry the baud rate divisor.
-        write_io_port_u8(COM1_LINE_CONTROL, 0x80);
+
+        // The divisor lives in the two low registers while the latch is open.
+        let mut control = LineControl::new(0);
+        control.set_divisor_latch(1);
+        write_io_port_u8(COM1_LINE_CONTROL, control.raw());
         write_io_port_u8(COM1, (BAUD_DIVISOR & 0xff) as u8);
         write_io_port_u8(COM1_INTERRUPT_ENABLE, (BAUD_DIVISOR >> 8) as u8);
-        // DLAB off: 8 data bits, no parity, one stop bit.
-        write_io_port_u8(COM1_LINE_CONTROL, 0x03);
-        // FIFO on and cleared, with a 14-byte threshold.
-        write_io_port_u8(COM1_FIFO_CONTROL, 0xc7);
-        write_io_port_u8(COM1_MODEM_CONTROL, MODEM_READY);
+
+        // Eight data bits, no parity, one stop bit.
+        let mut control = LineControl::new(0);
+        control.set_word_length(0b11);
+        write_io_port_u8(COM1_LINE_CONTROL, control.raw());
+
+        let mut fifo = FifoControl::new(0);
+        fifo.set_enable(1);
+        fifo.set_clear_received(1);
+        fifo.set_clear_transmitted(1);
+        fifo.set_trigger(0b11);
+        write_io_port_u8(COM1_FIFO_CONTROL, fifo.raw());
+
+        write_io_port_u8(COM1_MODEM_CONTROL, modem_ready().raw());
     }
 
     /// Sends a byte with the port in loopback mode and reads it back, proving
@@ -55,9 +117,10 @@ impl Serial {
     /// The modem control register is restored on the way out even when the test
     /// fails, so a broken port cannot also be left deaf.
     pub fn loopback_test(&mut self) -> Result<()> {
-        write_io_port_u8(COM1_MODEM_CONTROL, MODEM_LOOPBACK);
+        write_io_port_u8(COM1_MODEM_CONTROL, modem_loopback().raw());
         let byte = b'T';
-        while read_io_port_u8(COM1_LINE_STATUS) & TRANSMITTER_EMPTY == 0 {
+        while LineStatus::new(read_io_port_u8(COM1_LINE_STATUS)).transmitter_empty() == 0
+        {
             core::hint::spin_loop();
         }
         write_io_port_u8(COM1, byte);
@@ -75,7 +138,7 @@ impl Serial {
             }
             core::hint::spin_loop();
         }
-        write_io_port_u8(COM1_MODEM_CONTROL, MODEM_READY);
+        write_io_port_u8(COM1_MODEM_CONTROL, modem_ready().raw());
         outcome
     }
 
@@ -84,7 +147,7 @@ impl Serial {
     /// The port itself is not touched until the line status says a byte is
     /// waiting, so this never blocks and a task can poll it from the executor.
     pub fn try_read(&mut self) -> Option<u8> {
-        if read_io_port_u8(COM1_LINE_STATUS) & DATA_READY == 0 {
+        if LineStatus::new(read_io_port_u8(COM1_LINE_STATUS)).data_ready() == 0 {
             None
         } else {
             Some(read_io_port_u8(COM1))
@@ -95,7 +158,9 @@ impl Serial {
 impl fmt::Write for Serial {
     fn write_str(&mut self, s: &str) -> fmt::Result {
         for byte in s.bytes() {
-            while read_io_port_u8(COM1_LINE_STATUS) & TRANSMITTER_EMPTY == 0 {
+            while LineStatus::new(read_io_port_u8(COM1_LINE_STATUS)).transmitter_empty()
+                == 0
+            {
                 core::hint::spin_loop();
             }
             write_io_port_u8(COM1, byte);

@@ -30,7 +30,7 @@ const BAR_STRIDE: u16 = 4;
 
 bitfield! {
     /// The command register: what a function may do on the bus.
-    Command {
+    Command: u32 {
         io_space: 0, 0,
         memory_space: 1, 1 -> set_memory_space,
         bus_master: 2, 2 -> set_bus_master,

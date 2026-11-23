@@ -85,7 +85,7 @@ const _: () = assert!(size_of::<Port>() == 0x10);
 
 bitfield! {
     /// `USBCMD`: whether the controller runs, and whether it is reset.
-    UsbCmd {
+    UsbCmd: u32 {
         run: 0, 0 -> set_run,
         reset: 1, 1 -> set_reset,
     }
@@ -93,7 +93,7 @@ bitfield! {
 
 bitfield! {
     /// `USBSTS`: what the controller is doing.
-    UsbSts {
+    UsbSts: u32 {
         halted: 0, 0,
         not_ready: 11, 11,
     }
@@ -101,14 +101,14 @@ bitfield! {
 
 bitfield! {
     /// `HCCPARAMS1`: what the controller supports.
-    HccParams1 {
+    HccParams1: u32 {
         context_size: 2, 2,
     }
 }
 
 bitfield! {
     /// `PORTSC`: a port's status and control word.
-    Portsc {
+    Portsc: u32 {
         connected: 0, 0,
         enabled: 1, 1,
         reset: 4, 4,
@@ -293,7 +293,7 @@ impl TrbType {
 
 bitfield! {
     /// The control dword of a TRB: what kind it is and which lap it belongs to.
-    TrbControl {
+    TrbControl: u32 {
         cycle: 0, 0,
         link_toggle: 1, 1,
         trb_type: 15, 10,
@@ -743,7 +743,7 @@ impl EventChannel {
 
 bitfield! {
     /// Slot context word 0: the device's speed and how many contexts follow.
-    SlotContext0 {
+    SlotContext0: u32 {
         route_string: 19, 0,
         speed: 23, 20 -> set_speed,
         context_entries: 31, 27 -> set_context_entries,
@@ -752,7 +752,7 @@ bitfield! {
 
 bitfield! {
     /// Slot context word 1: where the device sits.
-    SlotContext1 {
+    SlotContext1: u32 {
         max_exit_latency: 15, 0,
         root_hub_port: 23, 16 -> set_root_hub_port,
     }
@@ -760,7 +760,7 @@ bitfield! {
 
 bitfield! {
     /// Slot context word 3: what the controller reports about the device.
-    SlotContext3 {
+    SlotContext3: u32 {
         device_address: 7, 0,
         slot_state: 31, 27,
     }
@@ -768,7 +768,7 @@ bitfield! {
 
 bitfield! {
     /// Endpoint context word 1: what the endpoint is and how it behaves.
-    EndpointContext1 {
+    EndpointContext1: u32 {
         cerr: 2, 1 -> set_cerr,
         ep_type: 5, 3 -> set_ep_type,
         max_packet: 31, 16 -> set_max_packet,
@@ -777,7 +777,7 @@ bitfield! {
 
 bitfield! {
     /// Endpoint context word 4: the average TRB length and the periodic payload.
-    EndpointContext4 {
+    EndpointContext4: u32 {
         average_trb_length: 15, 0 -> set_average_trb_length,
     }
 }
