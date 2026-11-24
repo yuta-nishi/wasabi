@@ -99,3 +99,24 @@ pub fn a_report_carries_the_keys_that_are_held() {
     // A short report has nothing to say.
     assert!(keys(&[0x00, 0x00]).iter().all(Option::is_none));
 }
+
+pub fn holding_a_key_does_not_type_it_again() {
+    use wasabi::usb::hid::newly_pressed;
+    use wasabi::usb::hid::usages;
+
+    // The letter b is held: the keyboard keeps reporting the same key.
+    let report = [0x00, 0x00, 0x05, 0x00, 0x00, 0x00, 0x00, 0x00];
+    let mut previous = [0u8; 6];
+    let first = newly_pressed(&report, &previous);
+    assert_eq!(first[0], Some('b'));
+
+    previous = usages(&report);
+    let again = newly_pressed(&report, &previous);
+    assert!(again.iter().all(Option::is_none));
+
+    // A second key while the first is still held is typed.
+    let both = [0x00, 0x00, 0x05, 0x06, 0x00, 0x00, 0x00, 0x00];
+    let keys = newly_pressed(&both, &previous);
+    assert_eq!(keys[0], None);
+    assert_eq!(keys[1], Some('c'));
+}

@@ -772,6 +772,8 @@ struct InterruptEndpoint {
     endpoint_id: u32,
     ring: Ring<RING_TRBS>,
     buffer: IoBox<[u8; 8]>,
+    /// The keys the previous report held, so a held key is typed once.
+    previous: [u8; 6],
 }
 
 /// The command ring and the doorbell that says it moved.
@@ -1502,6 +1504,7 @@ impl HostController {
             endpoint_id,
             ring,
             buffer,
+            previous: [0; 6],
         });
         self.arm_interrupt(position);
         info!(
@@ -1535,8 +1538,8 @@ impl HostController {
             return Ok(());
         };
         let keys = {
-            let device = &self.devices[position];
-            let Some(interrupt) = device.interrupt.as_ref() else {
+            let device = &mut self.devices[position];
+            let Some(interrupt) = device.interrupt.as_mut() else {
                 return Ok(());
             };
             if interrupt.endpoint_id != endpoint_id {
@@ -1545,10 +1548,17 @@ impl HostController {
             // SAFETY: the buffer is page aligned and the controller wrote the
             // eight bytes of a boot-protocol report into it.
             let report = unsafe { Self::descriptor_bytes(interrupt.buffer.address(), 8) };
-            hid::keys(report)
+            let keys = hid::newly_pressed(report, &interrupt.previous);
+            interrupt.previous = hid::usages(report);
+            keys
         };
         for key in keys.iter().flatten() {
-            info!("xhci: slot {slot} key {key:?}");
+            if key.is_ascii() {
+                // The line buffer works in bytes; Enter arrives as a carriage
+                // return, the way the serial port sends it.
+                let byte = if *key == '\n' { b'\r' } else { *key as u8 };
+                crate::input::push(byte);
+            }
         }
         self.arm_interrupt(position);
         Ok(())
