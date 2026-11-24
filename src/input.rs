@@ -1,5 +1,6 @@
 use crate::executor;
 use crate::info;
+use crate::mutex::Mutex;
 use crate::println;
 use crate::serial::Serial;
 use crate::timer;
@@ -59,6 +60,29 @@ impl Line {
     }
 }
 
+/// The line both input sources feed.
+static CONSOLE: Mutex<Line> = Mutex::new(Line::new());
+
+/// Adds one byte to the console line; a finished line is logged.
+pub fn push(byte: u8) {
+    let mut finished = [0u8; LINE_CAPACITY];
+    let mut length = 0;
+    {
+        let mut line = CONSOLE.lock();
+        if let Some(text) = line.push(byte) {
+            length = text.len();
+            finished[..length].copy_from_slice(text);
+        }
+    }
+    if length > 0 {
+        let text = core::str::from_utf8(&finished[..length]).unwrap_or("<not utf-8>");
+        info!("input: \"{text}\"");
+    } else if byte == b'\r' || byte == b'\n' {
+        // An empty line still gets its own newline.
+        println!();
+    }
+}
+
 /// Polls the serial port and logs each line once Enter arrives.
 ///
 /// `Serial::try_read` only touches the data register when the line status says a
@@ -67,20 +91,12 @@ impl Line {
 pub fn spawn_console() {
     executor::spawn(async {
         let mut serial = Serial;
-        let mut line = Line::new();
         // QEMU's window and the terminal both take keys: only the terminal's
         // reach COM1, and only while no key is held by the window.
         println!("serial console: type in this terminal, then press Enter");
         loop {
             while let Some(byte) = serial.try_read() {
-                match line.push(byte) {
-                    Some(text) => {
-                        let text = core::str::from_utf8(text).unwrap_or("<not utf-8>");
-                        info!("input: \"{text}\"");
-                    }
-                    None if byte == b'\r' || byte == b'\n' => println!(),
-                    None => {}
-                }
+                push(byte);
             }
             timer::sleep(Duration::from_millis(10)).await;
         }

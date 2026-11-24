@@ -3,6 +3,8 @@ use wasabi::usb::descriptor::DeviceDescriptor;
 use wasabi::usb::descriptor::EndpointDescriptor;
 use wasabi::usb::descriptor::InterfaceDescriptor;
 use wasabi::usb::descriptor::descriptors;
+use wasabi::usb::hid::key_for;
+use wasabi::usb::hid::keys;
 
 /// The QEMU USB keyboard's device descriptor, as the controller returned it.
 const KEYBOARD_DEVICE: &[u8] = &[
@@ -74,4 +76,47 @@ pub fn a_broken_length_ends_the_walk() {
     // The first descriptor claims thirteen bytes but only nine follow.
     let broken = &[0x0d, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
     assert_eq!(descriptors(broken).count(), 0);
+}
+
+pub fn usage_codes_become_characters() {
+    assert_eq!(key_for(0x04, false), Some('a'));
+    assert_eq!(key_for(0x04, true), Some('A'));
+    assert_eq!(key_for(0x1e, false), Some('1'));
+    assert_eq!(key_for(0x1e, true), Some('!'));
+    assert_eq!(key_for(0x2c, false), Some(' '));
+    assert_eq!(key_for(0x28, false), Some('\n'));
+    assert_eq!(key_for(0x00, false), None);
+    assert_eq!(key_for(0x68, false), None);
+}
+
+pub fn a_report_carries_the_keys_that_are_held() {
+    // Shift held, then the letter b, then nothing else.
+    let report = [0x02, 0x00, 0x05, 0x00, 0x00, 0x00, 0x00, 0x00];
+    let decoded = keys(&report);
+    assert_eq!(decoded[0], Some('B'));
+    assert!(decoded[1..].iter().all(Option::is_none));
+
+    // A short report has nothing to say.
+    assert!(keys(&[0x00, 0x00]).iter().all(Option::is_none));
+}
+
+pub fn holding_a_key_does_not_type_it_again() {
+    use wasabi::usb::hid::newly_pressed;
+    use wasabi::usb::hid::usages;
+
+    // The letter b is held: the keyboard keeps reporting the same key.
+    let report = [0x00, 0x00, 0x05, 0x00, 0x00, 0x00, 0x00, 0x00];
+    let mut previous = [0u8; 6];
+    let first = newly_pressed(&report, &previous);
+    assert_eq!(first[0], Some('b'));
+
+    previous = usages(&report);
+    let again = newly_pressed(&report, &previous);
+    assert!(again.iter().all(Option::is_none));
+
+    // A second key while the first is still held is typed.
+    let both = [0x00, 0x00, 0x05, 0x06, 0x00, 0x00, 0x00, 0x00];
+    let keys = newly_pressed(&both, &previous);
+    assert_eq!(keys[0], None);
+    assert_eq!(keys[1], Some('c'));
 }
